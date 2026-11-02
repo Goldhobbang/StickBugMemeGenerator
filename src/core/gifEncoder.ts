@@ -22,7 +22,7 @@ export function encodeFrames(
     const f = frames[i];
     const palette = quantize(f.data, 256, { format: 'rgba4444' });
     const index = applyPalette(f.data, palette, 'rgba4444');
-    const delay = Math.max(20, Math.round(f.delayMs / 10) * 10);
+    const delay = Math.max(10, Math.round(f.delayMs / 10) * 10);
     gif.writeFrame(index, width, height, { palette, delay });
     fps.push(delay);
     onProgress?.(i + 1, frames.length);
