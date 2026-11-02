@@ -1,42 +1,43 @@
 /// <reference lib="webworker" />
-import { GIFEncoder, quantize, applyPalette } from 'gifenc';
+import { createGifFrameWriter, type GifPalette } from '../core/gifEncoder';
 
-export interface ExportRequest {
-  type: 'export';
-  frames: ArrayBuffer[];
-  width: number;
-  height: number;
-  delaysMs: number[];
-}
+type InMessage =
+  | { type: 'start'; width: number; height: number; palette: GifPalette }
+  | { type: 'frame'; delayMs: number; buffer: ArrayBuffer }
+  | { type: 'finish' };
 
-self.onmessage = (e: MessageEvent<ExportRequest>) => {
-  const { frames, width, height, delaysMs } = e.data;
-  if (e.data.type !== 'export') return;
+const scope = self as unknown as {
+  onmessage: ((event: MessageEvent<InMessage>) => void) | null;
+  postMessage: (message: unknown, transfer?: Transferable[]) => void;
+};
+
+let writer: ReturnType<typeof createGifFrameWriter> | null = null;
+
+scope.onmessage = (event) => {
+  const message = event.data;
   try {
-    const gif = GIFEncoder();
-    const total = frames.length;
-    for (let i = 0; i < total; i++) {
-      const rgba = new Uint8ClampedArray(frames[i]);
-      const palette = quantize(rgba, 256, { format: 'rgba4444' });
-      const index = applyPalette(rgba, palette, 'rgba4444');
-      // Preserve source centisecond timing; clamp only sub-20ms delays
-      // (widely ignored minimum in browsers). No FPS resampling here.
-      const delay = Math.max(10, Math.round((delaysMs[i] ?? 100) / 10) * 10);
-      gif.writeFrame(index, width, height, { palette, delay });
-      (self as unknown as Worker).postMessage({ type: 'progress', done: i + 1, total });
+    if (message.type === 'start') {
+      writer = createGifFrameWriter(message.width, message.height, message.palette);
+      scope.postMessage({ type: 'ready' });
+      return;
     }
-    gif.finish();
-    // gifenc may return a view onto an oversized internal buffer.
-    // Transfer only the actual GIF bytes, not unused buffer capacity.
-    const bytes = gif.bytes().slice();
-    (self as unknown as Worker).postMessage(
-      { type: 'done', buffer: bytes.buffer },
-      [bytes.buffer],
-    );
-  } catch (err) {
-    (self as unknown as Worker).postMessage({
+    if (!writer) throw new Error('Encoder not started.');
+    if (message.type === 'frame') {
+      writer.add(new Uint8ClampedArray(message.buffer), message.delayMs);
+      scope.postMessage({ type: 'ack', done: writer.frames });
+      return;
+    }
+    if (message.type === 'finish') {
+      const frames = writer.frames;
+      const bytes = writer.finish();
+      writer = null;
+      scope.postMessage({ type: 'done', buffer: bytes.buffer, frames }, [bytes.buffer]);
+    }
+  } catch (error) {
+    writer = null;
+    scope.postMessage({
       type: 'error',
-      message: err instanceof Error ? err.message : String(err),
+      message: error instanceof Error ? error.message : String(error),
     });
   }
 };

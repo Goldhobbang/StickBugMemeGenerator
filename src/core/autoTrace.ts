@@ -1,4 +1,6 @@
 import type { Point, TargetSegment } from './types';
+import { cutoutForeground, keepOverlappingComponent, rasterizePolygon } from './cutout';
+import { t } from './i18n';
 
 /**
  * Edge-guided, browser-only target tracer. This is deterministic computer
@@ -93,36 +95,6 @@ function gradientOf(frame: ImageData): Float32Array {
   }
   return mag;
 }
-function snap(points: P[], gradient: Float32Array, w: number, h: number, precision: number): P[] {
-  const clockwise = Math.sign(signedArea(points)) || 1;
-  const radius = Math.round(clamp(Math.min(w, h) * .09, 7, 24));
-  const moved = points.map((p, i) => {
-    const prev = points[(i + points.length - 2) % points.length];
-    const next = points[(i + 2) % points.length];
-    const dx = next.x - prev.x, dy = next.y - prev.y;
-    const len = Math.max(1, Math.hypot(dx, dy));
-    const nx = -dy / len * clockwise, ny = dx / len * clockwise;
-    let best = p, score = 0;
-    for (let j = -radius; j <= radius; j++) {
-      const x = Math.round(clamp(p.x + nx * j, 1, w - 2));
-      const y = Math.round(clamp(p.y + ny * j, 1, h - 2));
-      const value = gradient[y * w + x] - Math.abs(j) * (1.85 - precision * .006);
-      if (value > score) { best = { x, y }; score = value; }
-    }
-    return best;
-  });
-  let result = moved;
-  const passes = precision > 75 ? 1 : 2;
-  for (let j = 0; j < passes; j++) {
-    result = result.map((p, i) => {
-      const before = result[(i + result.length - 1) % result.length];
-      const after = result[(i + 1) % result.length];
-      return { x: (p.x * 4 + before.x + after.x) / 6,
-        y: (p.y * 4 + before.y + after.y) / 6 };
-    });
-  }
-  return result;
-}
 function insideMask(points: P[], w: number, h: number): Uint8Array {
   const canvas = document.createElement('canvas');
   canvas.width = w; canvas.height = h;
@@ -191,49 +163,148 @@ function internalLines(gradient: Float32Array, outline: P[], w: number, h: numbe
   return chosen;
 }
 
+function decimateClosed(points: P[], max: number): P[] {
+  if (points.length <= max) return points.slice();
+  const out: P[] = [];
+  for (let i = 0; i < max; i++) out.push(points[Math.floor(i * points.length / max)]);
+  return out;
+}
+
+/** Keep the silhouette. A huge epsilon turns the subject into a blob. */
+function simplifyOutline(points: P[], precision: number, budget: number): P[] {
+  let epsilon = 0.65 + Math.pow((100 - precision) / 100, 1.5) * 4.5;
+  let simple = simplifyClosed(points, epsilon);
+  let guard = 0;
+  while (simple.length > Math.max(budget, 3) * 1.35 && epsilon < 12 && guard++ < 8) {
+    epsilon = epsilon * 1.16 + 0.2;
+    simple = simplifyClosed(points, epsilon);
+  }
+  if (simple.length > budget) simple = decimateClosed(simple, budget);
+  return simple.length >= 3 ? simple : points.slice(0, Math.max(3, Math.min(points.length, budget)));
+}
+
+function outerContour(binary: Uint8Array, w: number, h: number): P[] {
+  const stride = w + 1;
+  const next = new Map<number, number[]>();
+  const edge = (ax: number, ay: number, bx: number, by: number) => {
+    const a = ay * stride + ax;
+    const b = by * stride + bx;
+    const list = next.get(a);
+    if (list) list.push(b);
+    else next.set(a, [b]);
+  };
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!binary[i]) continue;
+      if (y === 0 || !binary[i - w]) edge(x, y, x + 1, y);
+      if (x === w - 1 || !binary[i + 1]) edge(x + 1, y, x + 1, y + 1);
+      if (y === h - 1 || !binary[i + w]) edge(x + 1, y + 1, x, y + 1);
+      if (x === 0 || !binary[i - 1]) edge(x, y + 1, x, y);
+    }
+  }
+  let largest: P[] = [];
+  let largestArea = 0;
+  for (const [first, edges] of next) {
+    while (edges.length) {
+      const ring: P[] = [];
+      let at = first;
+      let closed = false;
+      let steps = 0;
+      while (steps++ < w * h * 4) {
+        ring.push({ x: at % stride, y: Math.floor(at / stride) });
+        const choices = next.get(at);
+        if (!choices?.length) break;
+        at = choices.pop()!;
+        if (at === first) {
+          closed = true;
+          break;
+        }
+      }
+      if (closed && ring.length >= 3) {
+        const area = Math.abs(signedArea(ring));
+        if (area > largestArea) {
+          largestArea = area;
+          largest = ring;
+        }
+      }
+    }
+  }
+  return largestArea >= 40 ? largest : [];
+}
+
+function ringTargets(
+  simple: P[],
+  normalize: (p: P) => Point,
+): TargetSegment[] {
+  const targets: TargetSegment[] = [];
+  simple.forEach((p, i) => {
+    const next = simple[(i + 1) % simple.length];
+    if (dist(p, next) < 1.1) return;
+    targets.push({
+      id: 't' + targets.length,
+      start: normalize(p),
+      end: normalize(next),
+      order: targets.length,
+    });
+  });
+  return targets;
+}
+
 /** Polygon coordinates are normalized 0..1, as are output targets. */
 export function traceSelectedRegion(frame: ImageData, roughPolygon: Point[], options: TraceOptions): TraceResult {
-  if (roughPolygon.length < 3) throw new Error('Sketch a closed loop around the desired object.');
+  if (roughPolygon.length < 3) throw new Error(t('err.sketchLoop'));
   const precision = clamp(options.precision, 0, 100);
   const maximum = Math.round(clamp(options.maximumSegments, 3, 200));
   const scale = Math.min(1, 512 / Math.max(frame.width, frame.height));
   const w = Math.max(16, Math.round(frame.width * scale));
   const h = Math.max(16, Math.round(frame.height * scale));
   const canvas = document.createElement('canvas');
-  canvas.width = frame.width; canvas.height = frame.height;
+  canvas.width = frame.width;
+  canvas.height = frame.height;
   canvas.getContext('2d')!.putImageData(frame, 0, 0);
   const sample = document.createElement('canvas');
-  sample.width = w; sample.height = h;
+  sample.width = w;
+  sample.height = h;
   const ctx = sample.getContext('2d', { willReadFrequently: true })!;
   ctx.drawImage(canvas, 0, 0, w, h);
-  const gradient = gradientOf(ctx.getImageData(0, 0, w, h));
-  const points: P[] = roughPolygon.map((p) => ({ x: clamp(p.x, 0, 1) * (w - 1), y: clamp(p.y, 0, 1) * (h - 1) }));
-  if (Math.abs(signedArea(points)) < 80) throw new Error('Selected area is too small. Draw a larger loop.');
-  const dense = snap(resample(points, 3), gradient, w, h, precision);
-  let epsilon = .55 + Math.pow((100 - precision) / 100, 1.8) * 17;
-  let simple = simplifyClosed(dense, epsilon);
-  const budget = options.mode === 'outline' ? maximum : Math.max(3, Math.floor(maximum * .72));
-  while (simple.length > budget && epsilon < 100) {
-    epsilon = epsilon * 1.24 + .35;
-    simple = simplifyClosed(dense, epsilon);
-  }
-  const normalize = (p: P): Point => ({ x: clamp(p.x / (w - 1), 0, 1), y: clamp(p.y / (h - 1), 0, 1) });
-  const targets: TargetSegment[] = [];
-  simple.forEach((p, i) => {
-    const next = simple[(i + 1) % simple.length];
-    if (dist(p, next) < 1.2) return;
-    targets.push({ id: 't' + targets.length, start: normalize(p), end: normalize(next), order: targets.length });
+  const image = ctx.getImageData(0, 0, w, h);
+  const points: P[] = roughPolygon.map((p) => ({
+    x: clamp(p.x, 0, 1) * (w - 1),
+    y: clamp(p.y, 0, 1) * (h - 1),
+  }));
+  if (Math.abs(signedArea(points)) < 80) throw new Error(t('err.areaSmall'));
+  const cut = cutoutForeground(image.data, w, h, points);
+  const fromMask = cut.separated ? outerContour(cut.mask, w, h) : [];
+  const dense = fromMask.length >= 3 ? fromMask : resample(points, 2);
+  const budget = options.mode === 'outline' ? maximum : Math.max(4, Math.floor(maximum * 0.82));
+  const simple = simplifyOutline(dense, precision, budget);
+  const normalize = (p: P): Point => ({
+    x: clamp(p.x / Math.max(1, w - 1), 0, 1),
+    y: clamp(p.y / Math.max(1, h - 1), 0, 1),
   });
-  const extra = options.mode === 'details'
-    ? internalLines(gradient, dense, w, h, precision, maximum - targets.length) : [];
+  const targets = ringTargets(simple, normalize);
+  const detailBudget = options.mode === 'details' ? Math.min(6, maximum - targets.length) : 0;
+  const extra = detailBudget > 0
+    ? internalLines(gradientOf(image), dense, w, h, precision, detailBudget, cut.mask)
+    : [];
   extra.forEach(({ a, b }) => {
-    targets.push({ id: 't' + targets.length, start: normalize(a), end: normalize(b), order: targets.length });
+    targets.push({
+      id: 't' + targets.length,
+      start: normalize(a),
+      end: normalize(b),
+      order: targets.length,
+    });
   });
-  if (!targets.length) throw new Error('No lines found. Try a wider sketch area.');
+  if (!targets.length) throw new Error(t('err.noLines'));
   return {
     segments: targets,
     contour: dense.map(normalize),
-    note: 'Local edge tracing: ' + targets.length + ' lines (' + (targets.length - extra.length) + ' outline, ' + extra.length + ' details).',
+    note: t(cut.separated ? 'trace.cutout' : 'trace.sketch', {
+      n: targets.length,
+      outline: targets.length - extra.length,
+      details: extra.length,
+    }),
   };
 }
 
@@ -249,74 +320,44 @@ export function traceSegmentationMask(
   modelWidth: number,
   modelHeight: number,
   options: TraceOptions,
+  sketch: Point[] = [],
 ): TraceResult {
   if (modelMask.length !== modelWidth * modelHeight)
-    throw new Error('AI segmentation mask dimensions are invalid.');
+    throw new Error(t('err.maskSize'));
   const precision = clamp(options.precision, 0, 100);
   const maxSegments = Math.round(clamp(options.maximumSegments, 3, 200));
   const scale = Math.min(1, 512 / Math.max(frame.width, frame.height));
   const w = Math.max(16, Math.round(frame.width * scale));
   const h = Math.max(16, Math.round(frame.height * scale));
-  const binary = new Uint8Array(w * h);
+  let peak = 0;
+  for (let i = 0; i < modelMask.length; i++) if (modelMask[i] > peak) peak = modelMask[i];
+  const confidence = peak > 1.5 ? 1 / peak : 1;
+  let binary = new Uint8Array(w * h);
   let foreground = 0;
   for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    const mx = Math.min(modelWidth - 1, Math.floor(x * modelWidth / w));
-    const my = Math.min(modelHeight - 1, Math.floor(y * modelHeight / h));
-    const selected = modelMask[my * modelWidth + mx] >= .5 ? 1 : 0;
+    const mx = Math.min(modelWidth - 1, Math.round(x * (modelWidth - 1) / Math.max(1, w - 1)));
+    const my = Math.min(modelHeight - 1, Math.round(y * (modelHeight - 1) / Math.max(1, h - 1)));
+    const selected = modelMask[my * modelWidth + mx] * confidence >= 0.42 ? 1 : 0;
     binary[y * w + x] = selected;
     foreground += selected;
   }
-  if (foreground < 20 || foreground > .97 * w * h)
-    throw new Error('AI could not isolate the selected object. Adjust your sketch or use local tracing.');
+  if (sketch.length >= 3) {
+    const region = rasterizePolygon(w, h, sketch.map((p) => ({
+      x: clamp(p.x, 0, 1) * (w - 1),
+      y: clamp(p.y, 0, 1) * (h - 1),
+    })));
+    binary = new Uint8Array(keepOverlappingComponent(binary, region, w, h));
+    foreground = 0;
+    for (let i = 0; i < binary.length; i++) foreground += binary[i];
+  }
+  if (foreground < 20 || foreground > 0.97 * w * h)
+    throw new Error(t('err.aiIsolate'));
 
-  // For each foreground pixel, emit clockwise directed edges at transitions.
-  // The longest closed loop corresponds to the main silhouette. Interior
-  // holes are intentionally ignored for outer-boundary reconstruction.
-  const stride = w + 1;
-  const next = new Map<number, number[]>();
-  const edge = (ax: number, ay: number, bx: number, by: number) => {
-    const a = ay * stride + ax, b = by * stride + bx;
-    const list = next.get(a);
-    if (list) list.push(b);
-    else next.set(a, [b]);
-  };
-  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-    const i = y * w + x;
-    if (!binary[i]) continue;
-    if (y === 0 || !binary[i - w]) edge(x, y, x + 1, y);
-    if (x === w - 1 || !binary[i + 1]) edge(x + 1, y, x + 1, y + 1);
-    if (y === h - 1 || !binary[i + w]) edge(x + 1, y + 1, x, y + 1);
-    if (x === 0 || !binary[i - 1]) edge(x, y + 1, x, y);
-  }
-
-  let largest: P[] = [];
-  let largestArea = 0;
-  for (const [first, edges] of next) {
-    while (edges.length) {
-      const ring: P[] = [];
-      let at = first, closed = false, steps = 0;
-      while (steps++ < w * h * 4) {
-        ring.push({ x: at % stride, y: Math.floor(at / stride) });
-        const choices = next.get(at);
-        if (!choices?.length) break;
-        at = choices.pop()!;
-        if (at === first) { closed = true; break; }
-      }
-      if (closed && ring.length >= 3) {
-        const area = Math.abs(signedArea(ring));
-        if (area > largestArea) { largestArea = area; largest = ring; }
-      }
-    }
-  }
-  if (largest.length < 3 || largestArea < 50)
-    throw new Error('AI mask has no usable object outline.');
-  let epsilon = .6 + Math.pow((100 - precision) / 100, 1.8) * 16;
-  let simple = simplifyClosed(largest, epsilon);
-  const budget = options.mode === 'outline' ? maxSegments : Math.max(3, Math.floor(maxSegments * .72));
-  while (simple.length > budget && epsilon < 100) {
-    epsilon = epsilon * 1.23 + .3;
-    simple = simplifyClosed(largest, epsilon);
-  }
+  const largest = outerContour(binary, w, h);
+  if (largest.length < 3)
+    throw new Error(t('err.aiOutline'));
+  const budget = options.mode === 'outline' ? maxSegments : Math.max(4, Math.floor(maxSegments * 0.82));
+  const simple = simplifyOutline(largest, precision, budget);
 
   const normalize = (p: P): Point => ({
     x: clamp(p.x / w, 0, 1), y: clamp(p.y / h, 0, 1),
@@ -336,18 +377,22 @@ export function traceSegmentationMask(
   const ctx = small.getContext('2d', { willReadFrequently: true })!;
   ctx.drawImage(source, 0, 0, w, h);
   const gradients = gradientOf(ctx.getImageData(0, 0, w, h));
-  const details = options.mode === 'details'
-    ? internalLines(gradients, largest, w, h, precision, maxSegments - targets.length, binary)
+  const detailBudget = options.mode === 'details' ? Math.min(6, maxSegments - targets.length) : 0;
+  const details = detailBudget > 0
+    ? internalLines(gradients, largest, w, h, precision, detailBudget, binary)
     : [];
   details.forEach(({ a, b }) => {
     targets.push({ id: 't' + targets.length, order: targets.length,
       start: normalize(a), end: normalize(b) });
   });
-  if (targets.length < 3) throw new Error('AI found too few outline segments. Try local tracing.');
+  if (targets.length < 3) throw new Error(t('err.aiFew'));
   return {
     segments: targets,
     contour: largest.map(normalize),
-    note: 'On-device AI segmentation: ' + targets.length +
-      ' editable lines (' + (targets.length - details.length) + ' outline, ' + details.length + ' details).',
+    note: t('trace.ai', {
+      n: targets.length,
+      outline: targets.length - details.length,
+      details: details.length,
+    }),
   };
 }
