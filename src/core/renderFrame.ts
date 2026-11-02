@@ -1,6 +1,7 @@
 import type { Point, Settings, UserSegment, TargetSegment, DecodedFrame } from './types';
 import { applyEasing, lerpPoint } from './interpolation';
 import { computeTimeline } from './timeline';
+import { fitSegmentsToTargets } from './segmentMapping';
 
 export interface RenderProject {
   image: HTMLImageElement | null;
@@ -24,6 +25,7 @@ export function currentSegmentsAt(
   const n = segs.length;
   const timeline = computeTimeline(n, s, proj.memeDuration);
   const { revealDuration, phaseCEnd, phaseDEnd } = timeline;
+  const fitted = fitSegmentsToTargets(segs, proj.targetById);
 
   // Count revealed during phase A; all visible afterwards (until F hides them).
   let visibleCount = n;
@@ -44,18 +46,14 @@ export function currentSegmentsAt(
   const result: { start: Point; end: Point }[] = [];
   for (let i = 0; i < visibleCount && i < n; i++) {
     const u = segs[i];
-    const tgt = proj.targetById.get(u.targetSegmentId);
-    if (!tgt) {
+    const destination = fitted.get(u.id);
+    if (!destination) {
       result.push({ start: u.start, end: u.end });
       continue;
     }
-    const srcS = u.start;
-    const srcE = u.end;
-    const dstS = u.flipped ? tgt.end : tgt.start;
-    const dstE = u.flipped ? tgt.start : tgt.end;
     result.push({
-      start: lerpPoint(srcS, dstS, easedT),
-      end: lerpPoint(srcE, dstE, easedT),
+      start: lerpPoint(u.start, destination.start, easedT),
+      end: lerpPoint(u.end, destination.end, easedT),
     });
   }
   return result;
