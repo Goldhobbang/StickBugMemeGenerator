@@ -867,7 +867,9 @@ function collectExportFrames(): {
     const ctx = c.getContext('2d')!;
     out.push({ data: ctx.getImageData(0, 0, W, H).data, width: W, height: H, delayMs: (step * 1000) });
   }
-  // Phase F: original frames verbatim, scaled up.
+  // Phase F: original frames verbatim, scaled up. No resampling of
+  // timing: each source frame keeps its own delay. At 1x, pixel data is
+  // copied without smoothing (nearest-neighbor path in renderFrame).
   const blit = document.createElement('canvas');
   for (let i = state.memeStartFrame; i < proj.memeFrames.length; i++) {
     const f = proj.memeFrames[i];
@@ -875,7 +877,7 @@ function collectExportFrames(): {
     blit.height = f.imageData.height;
     blit.getContext('2d')!.putImageData(f.imageData, 0, 0);
     const ctx = c.getContext('2d')!;
-    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, W, H);
     ctx.drawImage(blit, 0, 0, W, H);
     out.push({

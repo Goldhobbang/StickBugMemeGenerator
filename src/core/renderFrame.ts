@@ -127,12 +127,13 @@ export function renderFrame(
       frame = proj.memeFrames[i];
     }
     if (frame) {
-      // Draw composited ImageData scaled to canvas.
+      // Draw composited ImageData scaled to canvas. Nearest-neighbor:
+      // source palette pixels must not be smoothed.
       const tmp = getBlitCanvas(proj.gifWidth, proj.gifHeight);
       const tctx = tmp.getContext('2d');
       if (tctx) {
         tctx.putImageData(frame.imageData, 0, 0);
-        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingEnabled = false;
         ctx.clearRect(0, 0, W, H);
         // biome-ignore lint
         (ctx as CanvasRenderingContext2D).drawImage(tmp, 0, 0, W, H);
