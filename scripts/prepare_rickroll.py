@@ -22,7 +22,12 @@ for i in range(im.n_frames):
         snapshots[i] = rgba.copy()
     rgb = rgba.convert("RGB").resize(size, Image.Resampling.LANCZOS)
     # Per-frame color palette; original 640px reference remains available.
-    frames.append(rgb.quantize(colors=192, method=Image.Quantize.MEDIANCUT))
+    indexed = rgb.quantize(colors=192, method=Image.Quantize.MEDIANCUT)
+    # Pillow otherwise merges identical adjacent frames and changes their
+    # frame count. A single alternating corner palette index keeps 1:1
+    # timing even for static source frames (visually negligible at 256px).
+    indexed.putpixel((size[0] - 1, size[1] - 1), i % 2)
+    frames.append(indexed)
     delays.append(info["frameDelaysMs"][i])
     if i % 60 == 0:
         print(f"Optimized {i}/{im.n_frames} frames")
