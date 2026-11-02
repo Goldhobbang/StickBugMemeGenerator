@@ -17,6 +17,8 @@ export interface UserSegment {
   targetSegmentId: string;
   order: number;
   flipped: boolean;
+  /** Manual target selections remain pinned when strokes are added or removed. */
+  mappingMode?: 'auto' | 'manual';
 }
 
 export interface TemplateData {
