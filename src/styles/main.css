@@ -487,3 +487,42 @@ kbd { background: var(--panel-2); border: 1px solid var(--border); border-radius
   .custom-trace-settings { grid-template-columns: 1fr 1fr; }
   .custom-trace-settings label:first-child { grid-column: 1 / -1; }
 }
+
+
+/* Source video + GIF/MP4/WebM output switch */
+.export-format-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.export-format-label select {
+  min-width: 160px;
+  max-width: 250px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 7px 8px;
+  color: var(--text);
+  font-size: 12px;
+}
+.export-format-hint {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 7px 0;
+  line-height: 1.45;
+}
+.result-video {
+  display: none;
+  width: 100%;
+  max-height: 480px;
+  object-fit: contain;
+  background: #000;
+  border-radius: 8px;
+}
+.result-video.show { display: block; }
+.custom-gif-panel.exporting {
+  pointer-events: none;
+  opacity: .7;
+}
