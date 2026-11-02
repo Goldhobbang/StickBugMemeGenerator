@@ -23,8 +23,8 @@ export interface VariationPreset {
 export const VARIATIONS: Record<VariationId, VariationPreset> = {
   custom: {
     id: 'custom',
-    name: 'Custom GIF',
-    description: 'Upload a GIF, choose start and end frames, sketch around an object and trace its outline into editable target lines. Local edge tracing needs no API key.',
+    name: 'Custom GIF / Video',
+    description: 'Upload a GIF or short video, choose IN/OUT frames, sketch around an object and generate editable target lines. Output as GIF, MP4, or WebM (browser dependent).',
     gifFile: '',
     referenceWidth: 256,
     referenceHeight: 256,
