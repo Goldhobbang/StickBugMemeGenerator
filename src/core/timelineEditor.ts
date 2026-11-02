@@ -3,6 +3,8 @@
  * Dragging a phase's right handle changes ONLY that phase's duration;
  * later phases shift in absolute time but keep their own durations.
  */
+import { t } from './i18n';
+
 export type PhaseId = 'reveal' | 'before' | 'after' | 'motion' | 'final' | 'meme';
 
 export interface PhaseSpec {
@@ -38,9 +40,9 @@ export function mountTimelineEditor(
   config: TimelineEditorConfig,
 ): TimelineEditor {
   root.innerHTML =
-    '<div class="tl-heading"><strong>Full GIF timeline</strong>' +
+    '<div class="tl-heading"><strong data-i18n="tl.heading">Full GIF timeline</strong>' +
       '<span class="tl-total" aria-live="polite"></span></div>' +
-    '<p class="tl-instruction">Hover for a frame preview. Drag the edge of a color block to resize only that phase. Click to seek.</p>' +
+    '<p class="tl-instruction" data-i18n="tl.help">Hover for a frame preview. Drag the edge of a color block to resize only that phase. Click to seek.</p>' +
     '<div class="tl-track" aria-label="Interactive animation timeline">' +
       '<div class="tl-playhead" aria-hidden="true"></div></div>' +
     '<div class="tl-legend"></div>' +
@@ -218,12 +220,16 @@ export function mountTimelineEditor(
   function refresh(): void {
     const phases = currentPhases();
     const total = totalLength(phases);
-    totalLabel.textContent = 'Total: ' + timeText(total);
+    totalLabel.textContent = t('tl.total', { time: timeText(total) });
     for (const phase of phases) {
       const bar = bars.get(phase.id);
       const caption = legendTimes.get(phase.id);
       if (!bar || !caption) continue;
       bar.style.flex = String(Math.max(0, phase.duration)) + ' 1 0%';
+      const short = bar.querySelector('.tl-phase-label');
+      if (short) short.textContent = phase.shortLabel;
+      const legendName = legendTimes.get(phase.id)?.parentElement?.querySelector('.tl-legend-name');
+      if (legendName) legendName.textContent = phase.label;
       bar.title = phase.label + ' · ' + timeText(phase.duration);
       bar.setAttribute('aria-label', phase.label + ', ' + timeText(phase.duration));
       const handle = bar.querySelector('.tl-resize') as HTMLButtonElement;

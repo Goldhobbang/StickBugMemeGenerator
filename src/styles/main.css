@@ -24,8 +24,9 @@ body {
 
 #app { max-width: 1280px; margin: 0 auto; padding: 20px; }
 
-header.app-header { margin-bottom: 16px; }
+header.app-header { margin-bottom: 16px; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
 header.app-header h1 { margin: 0; font-size: 28px; letter-spacing: -0.5px; }
+.lang-switch { display: flex; gap: 6px; flex: none; }
 header.app-header h1 .bug { color: var(--accent); }
 header.app-header p { margin: 4px 0 0; color: var(--muted); }
 

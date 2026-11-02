@@ -20,12 +20,13 @@ import { introFrameDelaysMs } from './core/gifTiming';
 import { decodeVideoFile, VIDEO_SAMPLE_FPS } from './core/videoDecoder';
 import { preferredVideoFormat, recordProjectVideo } from './core/videoRecorder';
 import { mountCustomGifPanel, type CustomGifPanel } from './core/customGifPanel';
-import { computeTimeline, stageAtTime, STAGE_LABELS } from './core/timeline';
+import { computeTimeline, stageAtTime } from './core/timeline';
 import { distToSegmentPx, segmentLengthPx } from './core/interpolation';
 import { renderFrame, type RenderProject } from './core/renderFrame';
 import { autoAssignTargets, buildEffectiveSegments, coveredTargetCount, effectiveSegmentCount } from './core/segmentMapping';
 import { VARIATIONS, type VariationId } from './core/variations';
 import { mountTimelineEditor, type PhaseId, type PhaseSpec, type TimelineEditor } from './core/timelineEditor';
+import { applyI18n, onLangChange, setLang, t } from './core/i18n';
 
 // ---------------------------------------------------------------- state
 
@@ -90,76 +91,82 @@ const app = document.getElementById('app')!;
 
 app.innerHTML = `
 <header class="app-header">
-  <h1>Stick <span class="bug">Bug</span> Meme Generator</h1>
-  <p>Turn an image into a Stick Bug, RickRoll, or custom GIF/video meme.</p>
+  <div>
+    <h1>Stick <span class="bug">Bug</span> Meme Generator</h1>
+    <p data-i18n="app.subtitle">Turn an image into a Stick Bug, RickRoll, or custom GIF/video meme.</p>
+  </div>
+  <div class="lang-switch" role="group" aria-label="Language">
+    <button type="button" id="lang-ko" class="small">한국어</button>
+    <button type="button" id="lang-en" class="small">English</button>
+  </div>
 </header>
 <div class="layout">
   <section class="panel" aria-label="Image editor">
-    <h2>Image Editor</h2>
+    <h2 data-i18n="editor.title">Image Editor</h2>
     <div class="variation-picker">
-      <label for="variation-select">Final meme variation</label>
-      <select id="variation-select" aria-label="Select final meme variation">
-        <option value="stickbug">Stick Bug</option>
-        <option value="rickroll">RickRoll</option>
-        <option value="custom">Custom GIF / Video · Auto Trace</option>
+      <label for="variation-select" data-i18n="variation.label">Final meme variation</label>
+      <select id="variation-select" data-i18n-aria="variation.label">
+        <option value="stickbug" data-i18n="opt.stickbug">Stick Bug</option>
+        <option value="rickroll" data-i18n="opt.rickroll">RickRoll</option>
+        <option value="custom" data-i18n="opt.custom">Custom GIF / Video · Auto Trace</option>
       </select>
       <p id="variation-description"></p>
     </div>
     <div id="custom-panel" class="custom-gif-panel" hidden></div>
     <div class="toolbar">
-      <button id="btn-upload">Upload image</button>
+      <button id="btn-upload" data-i18n="upload">Upload image</button>
       <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp" hidden />
-      <button id="tool-draw" class="active">Draw</button>
-      <button id="tool-select">Select</button>
-      <button id="btn-undo" disabled>Undo</button>
-      <button id="btn-redo" disabled>Redo</button>
-      <button id="btn-del" class="danger" disabled>Delete</button>
-      <button id="btn-clear" class="danger">Clear</button>
+      <button id="tool-draw" class="active" data-i18n="draw">Draw</button>
+      <button id="tool-select" data-i18n="select">Select</button>
+      <button id="btn-undo" data-i18n="undo" disabled>Undo</button>
+      <button id="btn-redo" data-i18n="redo" disabled>Redo</button>
+      <button id="btn-del" class="danger" data-i18n="delete" disabled>Delete</button>
+      <button id="btn-clear" class="danger" data-i18n="clear">Clear</button>
       <span class="seg-count short" id="seg-count">Drawn: 0</span>
       <span class="seg-count template-count" id="seg-template">Template: ${N}</span>
       <span class="seg-count short" id="seg-animated">Animated: 0</span>
-      <button class="small" id="btn-auto-map" title="Reset manual mappings and distribute strokes automatically">Auto-map all</button>
+      <button class="small" id="btn-auto-map" data-i18n="autoMap" data-i18n-title="autoMapTitle">Auto-map all</button>
     </div>
-    <div class="dropzone" id="dropzone">Drag &amp; drop PNG / JPEG / WebP here, or click Upload</div>
+    <div class="dropzone" id="dropzone" data-i18n="dropzone">Drag &amp; drop PNG / JPEG / WebP here, or click Upload</div>
     <div class="editor-wrap"><canvas id="editor" class="editor" width="440" height="248"></canvas></div>
     <div id="mapping" class="mapping-list" aria-label="Segment mapping"></div>
     ${CALIBRATE_MODE ? '<div class="calib-hint"><b>Calibration mode</b> (?calibrate=1): final outline frame shown. Draw = add target segment. Select + drag = adjust. <button id="btn-calib-export" class="small">Copy template JSON</button> <button id="btn-calib-use" class="small">Use as template</button></div>' : ''}
   </section>
   <section class="panel" aria-label="Animation preview">
-    <h2>Animation Preview</h2>
+    <h2 data-i18n="preview.title">Animation Preview</h2>
     <div class="stage-badge" id="stage">–</div>
     <canvas id="preview" class="preview-canvas" width="440" height="248"></canvas>
     <section class="timeline-panel" aria-label="Entire GIF timeline">
       <div id="timeline-editor" class="timeline-editor"></div>
     </section>
     <div class="seek-row">
-      <button id="btn-play" class="small">Play</button>
-      <button id="btn-restart" class="small">Restart</button>
+      <button id="btn-play" class="small" data-i18n="play">Play</button>
+      <button id="btn-restart" class="small" data-i18n="restart">Restart</button>
       <input type="range" id="seek" min="0" max="1000" value="0" aria-label="Seek" />
       <span class="time-label" id="time">0.0 / 0.0s</span>
     </div>
     <div class="toolbar">
-      <label class="export-format-label" for="export-format">Output
-        <select id="export-format" aria-label="Output format">
-          <option value="gif">Animated GIF (.gif)</option>
+      <label class="export-format-label" for="export-format"><span data-i18n="output">Output</span>
+        <select id="export-format" data-i18n-aria="output">
+          <option value="gif" data-i18n="gifOption">Animated GIF (.gif)</option>
           <option value="video">Video (browser-supported MP4 / WebM)</option>
         </select>
       </label>
       <button id="btn-generate" class="primary" disabled>Generate GIF</button>
       <a id="btn-download" style="display:none"><button class="primary">Download stick-bug-custom.gif</button></a>
-      <button id="btn-cancel" class="danger" style="display:none">Cancel</button>
+      <button id="btn-cancel" class="danger" data-i18n="cancel" style="display:none">Cancel</button>
     </div>
     <div class="progress" id="progress"><div id="progress-bar"></div></div>
-    <div class="status info" id="status">Loading reference GIF…</div>
+    <div class="status info" id="status"></div>
     <p id="export-format-hint" class="export-format-hint">GIF: silent animation. Video: silent MP4 or WebM using your browser's encoder.</p>
     <img id="result" class="result-img" alt="Generated GIF" />
     <video id="video-result" class="result-video" controls playsinline preload="metadata" aria-label="Generated video preview"></video>
     <details class="settings" open>
-      <summary>Animation timing &amp; settings</summary>
+      <summary data-i18n="settingsSummary">Animation timing &amp; settings</summary>
       <div id="timing-summary" class="timing-summary" aria-live="polite"></div>
       <div class="settings-grid" id="settings-grid"></div>
     </details>
-    <div class="kbd-hint"><kbd>Ctrl+Z</kbd> undo · <kbd>Ctrl+Y</kbd> redo · <kbd>Del</kbd> delete · <kbd>Esc</kbd> deselect · <kbd>Space</kbd> play/pause</div>
+    <div class="kbd-hint" data-i18n="kbd">Ctrl+Z undo · Ctrl+Y redo · Del delete · Esc deselect · Space play/pause</div>
   </section>
 </div>`;
 
@@ -199,15 +206,16 @@ function updateOutputFormatUI(): void {
   const selector = $('export-format') as HTMLSelectElement;
   const videoOption = selector.querySelector('option[value="video"]')!;
   (videoOption as HTMLOptionElement).disabled = !preferred;
-  videoOption.textContent = preferred ? 'Video (.' + preferred.extension + ')' : 'Video (unsupported browser)';
+  videoOption.textContent = preferred
+    ? t('videoOption', { ext: preferred.extension })
+    : t('videoUnsupported');
   if (!preferred && state.outputFormat === 'video') state.outputFormat = 'gif';
   selector.value = state.outputFormat;
   selector.disabled = state.exporting;
-  $('btn-generate').textContent = state.outputFormat === 'gif' ? 'Generate GIF' : 'Generate video';
+  $('btn-generate').textContent = state.outputFormat === 'gif' ? t('generateGif') : t('generateVideo');
   $('export-format-hint').textContent = state.outputFormat === 'gif'
-    ? 'GIF: animated image without sound, using original source-frame timing.'
-    : 'Video: silent ' + (preferred?.label ?? 'MP4/WebM') +
-      ' captured in real time. Output container depends on browser support.';
+    ? t('hintGif')
+    : t('hintVideo', { label: preferred?.label ?? 'MP4/WebM' });
   updateGenerateButton();
 }
 
@@ -380,7 +388,7 @@ function drawEditor(draft?: { a: Point; b: Point }): void {
     editorCtx.fillStyle = '#9a9ab0';
     editorCtx.font = '14px sans-serif';
     editorCtx.textAlign = 'center';
-    editorCtx.fillText('Upload an image to start drawing', W / 2, H / 2);
+    editorCtx.fillText(t('placeholder'), W / 2, H / 2);
     editorCtx.textAlign = 'left';
   }
 
@@ -520,7 +528,7 @@ editorCanvas.addEventListener('pointerdown', (e) => {
   }
 
   if (!state.image) {
-    setStatus('Upload an image before drawing segments.', 'error');
+    setStatus(t('needImage'), 'error');
     return;
   }
   if (state.tool === 'draw') {
@@ -625,7 +633,7 @@ editorCanvas.addEventListener('pointerup', (e) => {
       const W = state.decoded?.width ?? 220;
       const H = state.decoded?.height ?? 124;
       if (segmentLengthPx(a, p, W, H) < 4) {
-        setStatus('Segment too short — drag a longer line.', 'error');
+        setStatus(t('shortSeg'), 'error');
       } else {
         checkpoint();
         const order = state.userSegments.length;
@@ -693,9 +701,7 @@ function renderMapping(): void {
     return;
   }
   if (TARGETS.length === 0) {
-    box.textContent = state.variation === 'custom'
-      ? 'Sketch and trace the custom GIF target before mapping lines.'
-      : 'No template targets available.';
+    box.textContent = state.variation === 'custom' ? t('mappingCustom') : t('mappingNone');
     return;
   }
   const colors = ['#a855f7', '#22d3ee', '#f472b6', '#facc15', '#34d399', '#fb923c', '#818cf8', '#f87171', '#2dd4bf'];
@@ -711,8 +717,8 @@ function renderMapping(): void {
         <select aria-label="Target for segment ${i + 1}">
           ${TARGETS.map((t, ti) => `<option value="${t.id}" ${t.id === sg.targetSegmentId ? 'selected' : ''}>→ target ${ti + 1}</option>`).join('')}
         </select>
-        <button class="small" title="Reverse direction">⇄ ${sg.flipped ? 'rev' : 'fwd'}</button>
-        <span title="${sg.mappingMode === 'manual' ? 'Pinned by user' : 'Automatically distributed'}" style="color:var(--muted)">${sg.mappingMode === 'manual' ? 'Pinned' : 'Auto'} · t${targetIdx + 1}</span>`;
+        <button class="small" title="Reverse direction">⇄ ${sg.flipped ? t('rev') : t('fwd')}</button>
+        <span style="color:var(--muted)">${sg.mappingMode === 'manual' ? t('pinned') : t('autoWord')} · t${targetIdx + 1}</span>`;
       row.querySelector('select')!.addEventListener('change', (e) => {
         checkpoint();
         sg.targetSegmentId = (e.target as HTMLSelectElement).value;
@@ -746,7 +752,7 @@ function afterSegmentsChanged(clearErr = true): void {
   updatePreviewUI();
   if (clearErr && state.refError === null) {
     const issue = validate();
-    setStatus(issue ?? 'Ready. Missing strokes are cloned evenly; extra strokes fit the final outline.', issue ? 'error' : 'ok');
+    setStatus(issue ?? t('ready'), issue ? 'error' : 'ok');
   }
 }
 
@@ -754,40 +760,42 @@ function updateCounts(): void {
   const drawn = state.userSegments.length;
   const animated = effectiveSegmentCount(state.userSegments, TARGETS);
   const clones = Math.max(0, animated - drawn);
-  segCountEl.textContent = `Drawn: ${drawn}`;
+  segCountEl.textContent = t('drawn', { n: drawn });
   segCountEl.className = `seg-count ${drawn > 0 ? 'ok' : 'short'}`;
-  $('seg-template').textContent = `Template: ${N}`;
-  $('seg-animated').textContent = `Animated: ${animated}${clones ? ` (+${clones} copies)` : ''}`;
+  $('seg-template').textContent = t('template', { n: N });
+  $('seg-animated').textContent = clones
+    ? t('animatedCopies', { n: animated, copies: clones })
+    : t('animated', { n: animated });
   $('seg-animated').className = `seg-count ${drawn > 0 ? 'ok' : 'short'}`;
   updateGenerateButton();
 }
 
 function validate(): string | null {
   if (state.refError) return state.refError;
-  if (!state.decoded) return 'Source GIF/video still loading…';
-  if (state.outputFormat === 'video' && !preferredVideoFormat()) return 'Video recording is not supported by this browser. Choose GIF.';
+  if (!state.decoded) return t('err.loading');
+  if (state.outputFormat === 'video' && !preferredVideoFormat()) return t('err.videoUnsupported');
   if (state.memeStartFrame < 0 || state.memeStartFrame >= state.decoded.frames.length)
-    return 'Invalid meme start frame for the selected variation.';
+    return t('err.memeStart');
   if (state.memeEndFrameExclusive <= state.memeStartFrame || state.memeEndFrameExclusive > state.decoded.frames.length)
-    return 'Choose a valid source GIF end frame.';
+    return t('err.memeEnd');
   if (state.variation === 'custom' && N === 0)
-    return 'Sketch the custom GIF target and generate its outline first.';
-  if (!state.image) return 'Upload an image to begin.';
+    return t('err.customOutline');
+  if (!state.image) return t('err.needImage');
   if (state.userSegments.length === 0)
-    return 'Draw at least one line. Missing template lines will be cloned automatically.';
+    return t('err.needLine');
   const animatedSegments = buildEffectiveSegments(state.userSegments, TARGETS);
   if (coveredTargetCount(animatedSegments, TARGETS) !== N)
-    return 'Could not cover the entire target outline. Try Auto-map all.';
+    return t('err.cover');
   const W = state.decoded.width;
   const H = state.decoded.height;
   if (state.outputFormat === 'video') {
     if (state.decoded.width * state.settings.exportScale * state.decoded.height * state.settings.exportScale > 1920 * 1080)
-      return 'Video export exceeds 1920×1080. Choose a smaller export scale.';
-    if (totalDuration() > 90) return 'Video export must be 90 seconds or less.';
+      return t('err.videoScale');
+    if (totalDuration() > 90) return t('err.videoLength');
   }
   for (const sg of state.userSegments) {
-    if (segmentLengthPx(sg.start, sg.end, W, H) < 4) return 'One segment is too short.';
-    if (!targetById.has(sg.targetSegmentId)) return 'Unknown target mapping.';
+    if (segmentLengthPx(sg.start, sg.end, W, H) < 4) return t('err.short');
+    if (!targetById.has(sg.targetSegmentId)) return t('err.mapping');
   }
   return null;
 }
@@ -801,7 +809,7 @@ function updateGenerateButton(): void {
 function loadImageFile(file: File): void {
   const okTypes = ['image/png', 'image/jpeg', 'image/webp'];
   if (!okTypes.includes(file.type)) {
-    setStatus(`Unsupported format: ${file.type || file.name}. Use PNG, JPEG, or WebP.`, 'error');
+    setStatus(t('unsupported', { name: file.type || file.name }), 'error');
     return;
   }
   if (state.imageURL) URL.revokeObjectURL(state.imageURL);
@@ -812,12 +820,12 @@ function loadImageFile(file: File): void {
     state.imageURL = url;
     drawEditor();
     const v = validate();
-    setStatus(v ?? 'Image loaded. Draw segments.', v ? 'error' : 'ok');
+    setStatus(v ?? t('imageLoaded'), v ? 'error' : 'ok');
     updateGenerateButton();
   };
   img.onerror = () => {
     URL.revokeObjectURL(url);
-    setStatus('Could not decode that image — file may be corrupted.', 'error');
+    setStatus(t('corrupt'), 'error');
   };
   img.src = url;
 }
@@ -897,17 +905,17 @@ function timelinePhases(): PhaseSpec[] {
   const settings = state.settings;
   const memeLoaded = Boolean(state.decoded);
   return [
-    { id: 'reveal', label: 'Line reveal', shortLabel: 'Reveal', color: '#7655d9',
+    { id: 'reveal', label: t('phase.reveal'), shortLabel: t('phase.revealShort'), color: '#7655d9',
       duration: settings.revealTotalDuration, min: 0, max: 30 },
-    { id: 'before', label: 'Before background change', shortLabel: 'Before', color: '#346da9',
+    { id: 'before', label: t('phase.before'), shortLabel: t('phase.beforeShort'), color: '#346da9',
       duration: settings.holdAfterReveal, min: 0, max: 30 },
-    { id: 'after', label: 'After background change', shortLabel: 'After', color: '#1e8589',
+    { id: 'after', label: t('phase.after'), shortLabel: t('phase.afterShort'), color: '#1e8589',
       duration: settings.grayHold, min: 0, max: 30 },
-    { id: 'motion', label: 'Transformation motion', shortLabel: 'Move', color: '#b8772a',
+    { id: 'motion', label: t('phase.motion'), shortLabel: t('phase.motionShort'), color: '#b8772a',
       duration: settings.transformDuration, min: 0, max: 30 },
-    { id: 'final', label: 'Before original footage', shortLabel: 'Hold', color: '#9651a2',
+    { id: 'final', label: t('phase.final'), shortLabel: t('phase.finalShort'), color: '#9651a2',
       duration: settings.finalHold, min: 0, max: 30 },
-    { id: 'meme', label: 'Original GIF footage', shortLabel: 'Meme', color: '#338760',
+    { id: 'meme', label: t('phase.meme'), shortLabel: t('phase.memeShort'), color: '#338760',
       duration: selectedMemeDuration(),
       min: memeLoaded ? firstMemeFrameDuration() : 0,
       max: memeLoaded ? memeFullDuration() : 0 },
@@ -936,17 +944,22 @@ function syncTimingInputs(): void {
   }
   const detail = document.getElementById('meme-end-label');
   if (detail) {
-    if (!state.decoded) detail.textContent = 'Loading source frames…';
-    else detail.textContent =
-      'Source ' + selectedMemeDuration().toFixed(2) + ' / ' + memeFullDuration().toFixed(2) +
-      's · frames ' + state.memeStartFrame + '–' + (state.memeEndFrameExclusive - 1) +
-      ' (' + (state.memeEndFrameExclusive - state.memeStartFrame) + ' frames)';
+    if (!state.decoded) detail.textContent = t('loadingFrames');
+    else detail.textContent = t('frameSource', {
+      clip: selectedMemeDuration().toFixed(2),
+      full: memeFullDuration().toFixed(2),
+      start: state.memeStartFrame,
+      end: state.memeEndFrameExclusive - 1,
+      count: state.memeEndFrameExclusive - state.memeStartFrame,
+    });
   }
 }
 
 /** Editing any handle changes its phase's duration, and no other durations. */
 function customMediaDescription(): string {
-  return state.customMediaKind === 'video' ? 'Video sampled at ' + VIDEO_SAMPLE_FPS + ' fps' : 'GIF';
+  return state.customMediaKind === 'video'
+    ? t('media.video', { fps: VIDEO_SAMPLE_FPS })
+    : t('media.gif');
 }
 
 function syncCustomClipControls(): void {
@@ -980,8 +993,21 @@ function updateTimingSummary(): void {
   const intro = computeTimeline(animated, state.settings, 0).phaseEEnd;
   const step = animated > 0 ? state.settings.revealTotalDuration / animated : 0;
   const meme = state.decoded ? selectedMemeDuration() : null;
-  summary.textContent = `${drawn} drawn · ${animated} animated (${Math.max(0, animated - drawn)} clones) · template ${N} · ${state.settings.revealTotalDuration.toFixed(2)}s reveal (${step.toFixed(2)}s / line) · Intro ${intro.toFixed(2)}s`
-    + (meme === null ? ' · Loading source media…' : ` · Source clip ${meme.toFixed(2)}s / ${memeFullDuration().toFixed(2)}s · Total ${(intro + meme).toFixed(2)}s`);
+  summary.textContent = t('summary', {
+    drawn,
+    animated,
+    clones: Math.max(0, animated - drawn),
+    template: N,
+    reveal: state.settings.revealTotalDuration.toFixed(2),
+    step: step.toFixed(2),
+    intro: intro.toFixed(2),
+  }) + (meme === null
+    ? t('summaryLoading')
+    : t('summaryClip', {
+        clip: meme.toFixed(2),
+        full: memeFullDuration().toFixed(2),
+        total: (intro + meme).toFixed(2),
+      }));
   syncTimingInputs();
   timelineUI?.refresh();
 }
@@ -990,23 +1016,23 @@ function renderSettings(): void {
   const grid = $('settings-grid');
   const s = state.settings;
   grid.innerHTML = `
-    <div class="settings-section-title">Animation timing · seconds</div>
-    <label>Total line reveal time (s)<input type="number" id="set-reveal" min="0" max="30" step="0.05" value="${s.revealTotalDuration}"></label>
-    <label>Wait before background change (s)<input type="number" id="set-hold" min="0" max="30" step="0.1" value="${s.holdAfterReveal}"></label>
-    <label>Wait after background change (s)<input type="number" id="set-gray" min="0" max="30" step="0.1" value="${s.grayHold}"></label>
-    <label>Transformation motion (s)<input type="number" id="set-trans" min="0" max="30" step="0.1" value="${s.transformDuration}"></label>
-    <label>Wait before original GIF (s)<input type="number" id="set-final" min="0" max="30" step="0.1" value="${s.finalHold}"></label>
-    <label>Source clip playback length (s)<input type="number" id="set-meme" min="0.01" step="0.05" value="${selectedMemeDuration().toFixed(2)}">
-      <small class="meme-end-detail" id="meme-end-label">Loading source frames…</small>
+    <div class="settings-section-title">${t('secTitle')}</div>
+    <label>${t('revealTime')}<input type="number" id="set-reveal" min="0" max="30" step="0.05" value="${s.revealTotalDuration}"></label>
+    <label>${t('waitBefore')}<input type="number" id="set-hold" min="0" max="30" step="0.1" value="${s.holdAfterReveal}"></label>
+    <label>${t('waitAfter')}<input type="number" id="set-gray" min="0" max="30" step="0.1" value="${s.grayHold}"></label>
+    <label>${t('motionTime')}<input type="number" id="set-trans" min="0" max="30" step="0.1" value="${s.transformDuration}"></label>
+    <label>${t('waitFinal')}<input type="number" id="set-final" min="0" max="30" step="0.1" value="${s.finalHold}"></label>
+    <label>${t('clipLength')}<input type="number" id="set-meme" min="0.01" step="0.05" value="${selectedMemeDuration().toFixed(2)}">
+      <small class="meme-end-detail" id="meme-end-label">${t('loadingFrames')}</small>
     </label>
-    <div class="settings-section-title">Appearance &amp; export</div>
-    <label>Background<input type="color" id="set-bg" value="${s.backgroundColor}"></label>
-    <label>Segment color<input type="color" id="set-seg" value="${s.segmentColor}"></label>
-    <label>Stroke width (px)<input type="number" id="set-w" min="1" max="12" step="1" value="${s.segmentWidth}"></label>
-    <label>Easing<select id="set-ease"><option value="linear">linear</option><option value="ease-in-out">ease-in-out</option><option value="ease-out">ease-out</option></select></label>
-    <label title="Preview plays in real time. This value is the introduction frame rate for GIF and video export.">Export intro FPS<select id="set-fps"><option>15</option><option>30</option><option>24</option></select></label>
-    <label>Image fit<select id="set-fit"><option value="contain">contain</option><option value="cover">cover</option></select></label>
-    <label>Export scale<select id="set-scale"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></label>`;
+    <div class="settings-section-title">${t('lookTitle')}</div>
+    <label>${t('background')}<input type="color" id="set-bg" value="${s.backgroundColor}"></label>
+    <label>${t('segmentColor')}<input type="color" id="set-seg" value="${s.segmentColor}"></label>
+    <label>${t('strokeWidth')}<input type="number" id="set-w" min="1" max="12" step="1" value="${s.segmentWidth}"></label>
+    <label>${t('easing')}<select id="set-ease"><option value="linear">linear</option><option value="ease-in-out">ease-in-out</option><option value="ease-out">ease-out</option></select></label>
+    <label title="${t('fpsTitle')}">${t('fps')}<select id="set-fps"><option>15</option><option>30</option><option>24</option></select></label>
+    <label>${t('fit')}<select id="set-fit"><option value="contain">${t('fitContain')}</option><option value="cover">${t('fitCover')}</option></select></label>
+    <label>${t('scale')}<select id="set-scale"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></label>`;
   const num = (id: string, fn: (v: number) => void) =>
     $(id).addEventListener('input', (e) => {
       const input = e.target as HTMLInputElement;
@@ -1062,7 +1088,7 @@ function renderSettings(): void {
     state.settings.exportScale = (v === 2 || v === 4 ? v : 1) as 1 | 2 | 4;
     updateGenerateButton();
     const issue = validate();
-    if (issue && /export scale/i.test(issue)) setStatus(issue, 'error');
+    if (issue === t('err.videoScale')) setStatus(issue, 'error');
   });
   ($('set-scale') as HTMLSelectElement).value = String(s.exportScale);
   updateTimingSummary();
@@ -1078,7 +1104,7 @@ function previewTick(now: number): void {
     if (state.playT >= total && total > 0) {
       state.playT = total;
       state.playing = false;
-      ($('btn-play') as HTMLButtonElement).textContent = 'Play';
+      ($('btn-play') as HTMLButtonElement).textContent = t('play');
     }
     updatePreviewUI();
   }
@@ -1094,7 +1120,9 @@ function updatePreviewUI(): void {
     renderFrame(Math.min(state.playT, Math.max(0, total - 0.001)), previewCanvas, proj);
     const tl = computeTimeline(proj.userSegments.length, state.settings, proj.memeDuration);
     const stage = stageAtTime(state.playT, tl);
-    const stageLabel = stage === 'F' ? `F · ${VARIATIONS[state.variation].name}` : STAGE_LABELS[stage];
+    const stageLabel = stage === 'F'
+      ? t('stage.F', { name: t('name.' + state.variation) })
+      : t('stage.' + stage);
     $('stage').textContent = `${stageLabel} · ${state.playT.toFixed(1)}s`;
   }
   $('time').textContent = `${state.playT.toFixed(1)} / ${total.toFixed(1)}s`;
@@ -1104,18 +1132,18 @@ function updatePreviewUI(): void {
 
 $('btn-play').addEventListener('click', () => {
   if (!buildProject()) {
-    setStatus('Source GIF/video not loaded yet.', 'error');
+    setStatus(t('sourceNotLoaded'), 'error');
     return;
   }
   const total = totalDuration();
   if (state.playT >= total - 0.01) state.playT = 0;
   state.playing = !state.playing;
-  ($('btn-play') as HTMLButtonElement).textContent = state.playing ? 'Pause' : 'Play';
+  ($('btn-play') as HTMLButtonElement).textContent = state.playing ? t('pause') : t('play');
 });
 $('btn-restart').addEventListener('click', () => {
   state.playT = 0;
   state.playing = true;
-  ($('btn-play') as HTMLButtonElement).textContent = 'Pause';
+  ($('btn-play') as HTMLButtonElement).textContent = t('pause');
   updatePreviewUI();
 });
 $('seek').addEventListener('input', (e) => {
@@ -1216,7 +1244,7 @@ async function exportGifStream(signal: ExportCancel): Promise<{
     sampler.add(paint(i), stride);
     if (i % 8 === 0) {
       $('progress-bar').style.width = `${(i / steps.length) * 40}%`;
-      setStatus(`Sampling GIF colors ${i + 1}/${steps.length}…`, 'info');
+      setStatus(t('samplingColors', { i: i + 1, n: steps.length }), 'info');
       await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
   }
@@ -1232,7 +1260,7 @@ async function exportGifStream(signal: ExportCancel): Promise<{
       await write(rgba, steps[i].delayMs);
       if (i % 4 === 0) {
         $('progress-bar').style.width = `${40 + ((i + 1) / steps.length) * 60}%`;
-        setStatus(`Encoding GIF ${i + 1}/${steps.length}…`, 'info');
+        setStatus(t('encodingGif', { i: i + 1, n: steps.length }), 'info');
       }
     }
   };
@@ -1245,10 +1273,7 @@ async function exportGifStream(signal: ExportCancel): Promise<{
     };
   } catch (error) {
     if (signal.cancelled || (error instanceof Error && error.message === 'Export cancelled.')) throw error;
-    setStatus(
-      `Worker unavailable (${error instanceof Error ? error.message : 'error'}). Encoding in browser…`,
-      'info',
-    );
+    setStatus(t('workerFallback', { reason: error instanceof Error ? error.message : 'error' }), 'info');
     const writer = createGifFrameWriter(width, height, palette);
     await encodePass(async (rgba, delayMs) => {
       writer.add(rgba, delayMs);
@@ -1372,7 +1397,7 @@ async function runExport(): Promise<void> {
       const controller = new AbortController();
       state.recordingAbort = controller;
       $('btn-cancel').onclick = () => controller.abort();
-      setStatus('Recording video with your browser encoder… Keep this tab active.', 'info');
+      setStatus(t('recording'), 'info');
 
       const { blob, format, totalFrames } = await recordProjectVideo({
         project,
@@ -1382,8 +1407,10 @@ async function runExport(): Promise<void> {
         onProgress: (value) => {
           $('progress-bar').style.width = Math.round(value * 100) + '%';
           if (Math.round(value * 100) % 10 === 0) {
-            setStatus('Recording ' + formatLabelForRecording() + ' · ' +
-              Math.round(value * 100) + '% (keep this tab visible)', 'info');
+            setStatus(t('recordingProgress', {
+              label: formatLabelForRecording(),
+              percent: Math.round(value * 100),
+            }), 'info');
           }
         },
       });
@@ -1394,17 +1421,20 @@ async function runExport(): Promise<void> {
       const download = $('btn-download') as HTMLAnchorElement;
       download.href = state.exportedURL;
       download.download = VARIATIONS[state.variation].exportFilename.replace(/\.gif$/i, '.' + format.extension);
-      (download.querySelector('button') as HTMLButtonElement).textContent = 'Download ' + download.download;
+      (download.querySelector('button') as HTMLButtonElement).textContent = t('download', { name: download.download });
       download.style.display = '';
-      setStatus('Video ready · ' + format.label + ' · ' + totalFrames +
-        ' frames · ' + (blob.size / 1024 / 1024).toFixed(2) + ' MB · no audio', 'ok');
+      setStatus(t('videoReady', {
+        label: format.label,
+        frames: totalFrames,
+        mb: (blob.size / 1024 / 1024).toFixed(2),
+      }), 'ok');
     } else {
       const signal = { cancelled: false, abortEncoder: () => {} };
       $('btn-cancel').onclick = () => {
         signal.cancelled = true;
         signal.abortEncoder();
       };
-      setStatus('Rendering GIF frames…', 'info');
+      setStatus(t('rendering'), 'info');
       const exported = await exportGifStream(signal);
       const blob = new Blob([exported.bytes as unknown as BlobPart], { type: 'image/gif' });
       state.exportedURL = URL.createObjectURL(blob);
@@ -1414,7 +1444,7 @@ async function runExport(): Promise<void> {
       const download = $('btn-download') as HTMLAnchorElement;
       download.href = state.exportedURL;
       download.download = VARIATIONS[state.variation].exportFilename;
-      (download.querySelector('button') as HTMLButtonElement).textContent = 'Download ' + download.download;
+      (download.querySelector('button') as HTMLButtonElement).textContent = t('download', { name: download.download });
       download.style.display = '';
       const previousBytes = exported.frames * exported.width * exported.height * 4;
       console.info('GIF_EXPORT_STATS', JSON.stringify({
@@ -1427,18 +1457,17 @@ async function runExport(): Promise<void> {
         previousBufferedBytes: previousBytes,
         via: exported.via,
       }));
-      setStatus(
-        'GIF ready · ' + exported.frames + ' frames · ' +
-          (blob.size / 1024).toFixed(0) + ' KB · ' +
-          (exported.ms / 1000).toFixed(2) + 's · peak ' +
-          (exported.peakBytes / 1024 / 1024).toFixed(2) + ' MB',
-        'ok',
-      );
+      setStatus(t('gifReady', {
+        frames: exported.frames,
+        kb: (blob.size / 1024).toFixed(0),
+        seconds: (exported.ms / 1000).toFixed(2),
+        peak: (exported.peakBytes / 1024 / 1024).toFixed(2),
+      }), 'ok');
     }
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     const cancelled = message === 'Export cancelled.' || (e instanceof DOMException && e.name === 'AbortError');
-    setStatus(cancelled ? 'Export cancelled.' : 'Export failed: ' + message, cancelled ? 'info' : 'error');
+    setStatus(cancelled ? t('exportCancelled') : t('exportFailed', { message }), cancelled ? 'info' : 'error');
   } finally {
     state.recordingAbort = null;
     state.exporting = false;
@@ -1535,7 +1564,7 @@ async function selectVariation(id: VariationId): Promise<void> {
   state.refError = null;
   state.playing = false;
   state.playT = 0;
-  ($('btn-play') as HTMLButtonElement).textContent = 'Play';
+  ($('btn-play') as HTMLButtonElement).textContent = t('play');
   state.settings.backgroundColor = preset.backgroundColor;
   state.settings.segmentColor = preset.segmentColor;
   // The two target outlines have different stroke counts and positions.
@@ -1555,7 +1584,7 @@ async function selectVariation(id: VariationId): Promise<void> {
 
   clearExportResult();
   ($('variation-select') as HTMLSelectElement).value = id;
-  $('variation-description').textContent = preset.description;
+  $('variation-description').textContent = t('var.' + id);
   renderSettings();
   fitEditorCanvas();
   renderMapping();
@@ -1564,10 +1593,10 @@ async function selectVariation(id: VariationId): Promise<void> {
   drawEditor();
   updatePreviewUI();
   if (id === 'custom') {
-    setStatus('Upload a GIF or video, set IN/OUT frames, then sketch around its target object.', 'info');
+    setStatus(t('customStart'), 'info');
     return;
   }
-  setStatus(`Loading ${preset.name} reference GIF…`, 'info');
+  setStatus(t('loadingName', { name: t('name.' + id) }), 'info');
 
   try {
     let decoded = decodedCache.get(id);
@@ -1599,11 +1628,18 @@ async function selectVariation(id: VariationId): Promise<void> {
     renderMapping();
     updatePreviewUI();
     updateTimingSummary();
-    setStatus(`${preset.name} loaded: ${decoded.frames.length} frames, ${decoded.totalSec.toFixed(2)}s. Draw one or more lines; missing strokes are copied and extra strokes are fitted.`, 'ok');
+    setStatus(t('loadedPreset', {
+      name: t('name.' + id),
+      frames: decoded.frames.length,
+      seconds: decoded.totalSec.toFixed(2),
+    }), 'ok');
     updateGenerateButton();
   } catch (e) {
     if (token !== variationLoadToken) return;
-    state.refError = `${preset.name} reference failed to load: ${e instanceof Error ? e.message : String(e)}`;
+    state.refError = t('refFailed', {
+      name: t('name.' + id),
+      message: e instanceof Error ? e.message : String(e),
+    });
     setStatus(state.refError, 'error');
     updateGenerateButton();
   }
@@ -1629,9 +1665,7 @@ function applyCustomTargets(segments: TargetSegment[]): void {
   }
   state.selectedId = null;
   afterSegmentsChanged(false);
-  setStatus(N
-    ? 'Custom target ready: ' + N + ' lines. Draw source strokes on the image editor and generate your GIF.'
-    : 'Target is empty. Draw a rough closed loop to trace it.', N ? 'ok' : 'info');
+  setStatus(N ? t('targetReady', { n: N }) : t('targetEmpty'), N ? 'ok' : 'info');
 }
 
 function updateCustomClip(start: number, endExclusive: number): void {
@@ -1651,7 +1685,7 @@ function updateCustomClip(start: number, endExclusive: number): void {
   updateTimingSummary();
   updatePreviewUI();
   updateGenerateButton();
-  if (changedStart) setStatus('IN frame changed. Sketch this frame to generate a new target outline.', 'info');
+  if (changedStart) setStatus(t('inChanged'), 'info');
 }
 
 async function uploadCustomMedia(file: File): Promise<void> {
@@ -1662,14 +1696,17 @@ async function uploadCustomMedia(file: File): Promise<void> {
   uploadAbort = controller;
   const isVideo = file.type.startsWith('video/') || /\.(mp4|webm|mov|m4v|ogv)$/i.test(file.name);
   state.refError = null;
-  setStatus(isVideo ? 'Sampling video frames locally…' : 'Decoding custom GIF locally…', 'info');
+  setStatus(isVideo ? t('samplingVideo') : t('decodingGif'), 'info');
   try {
     const decoded = isVideo
       ? await decodeVideoFile(file, {
           signal: controller.signal,
           progress: (fraction) => {
             if (token === variationLoadToken && fraction > 0)
-              setStatus('Decoding video · ' + Math.round(fraction * 100) + '% · ' + VIDEO_SAMPLE_FPS + ' fps sampled', 'info');
+              setStatus(t('decodingVideo', {
+                percent: Math.round(fraction * 100),
+                fps: VIDEO_SAMPLE_FPS,
+              }), 'info');
           },
         })
       : await decodeGifFile(file);
@@ -1687,22 +1724,53 @@ async function uploadCustomMedia(file: File): Promise<void> {
     updateTimingSummary();
     updatePreviewUI();
     updateGenerateButton();
-    setStatus('Loaded ' + file.name + ': ' + decoded.frames.length +
-      ' sampled frames, ' + decoded.totalSec.toFixed(2) +
-      's. Sketch around your target on the IN frame.' +
-      (isVideo ? ' Source audio is not included in exports.' : ''), 'ok');
+    setStatus(t('loadedMedia', {
+      name: file.name,
+      frames: decoded.frames.length,
+      seconds: decoded.totalSec.toFixed(2),
+      audio: isVideo ? t('audioNote') : '',
+    }), 'ok');
   } catch (error) {
     if (token !== variationLoadToken || controller.signal.aborted) return;
     state.refError = error instanceof Error ? error.message : String(error);
-    setStatus('Custom media failed: ' + state.refError, 'error');
+    setStatus(t('mediaFailed', { message: state.refError }), 'error');
     updateGenerateButton();
   } finally {
     if (uploadAbort === controller) uploadAbort = null;
   }
 }
 
+function refreshLanguage(): void {
+  applyI18n(document);
+  $('variation-description').textContent = t('var.' + state.variation);
+  ($('btn-play') as HTMLButtonElement).textContent = state.playing ? t('pause') : t('play');
+  updateOutputFormatUI();
+  renderSettings();
+  customPanel?.refreshCopy();
+  timelineUI?.refresh();
+  updateCounts();
+  updateTimingSummary();
+  drawEditor();
+  updatePreviewUI();
+  if (state.exporting) return;
+  if (state.variation !== 'custom' && state.decoded && !state.image) {
+    setStatus(t('loadedPreset', {
+      name: t('name.' + state.variation),
+      frames: state.decoded.frames.length,
+      seconds: state.decoded.frames.reduce((sum, frame) => sum + frame.delaySec, 0).toFixed(2),
+    }), 'ok');
+    return;
+  }
+  const issue = validate();
+  setStatus(issue ?? t('ready'), issue ? 'error' : 'ok');
+}
+
 async function init(): Promise<void> {
   fitEditorCanvas();
+  applyI18n(document);
+  $('lang-ko').addEventListener('click', () => setLang('ko'));
+  $('lang-en').addEventListener('click', () => setLang('en'));
+  onLangChange(refreshLanguage);
   updateOutputFormatUI();
   customPanel = mountCustomGifPanel($('custom-panel'), {
     upload: (file) => { void uploadCustomMedia(file); },
@@ -1717,7 +1785,7 @@ async function init(): Promise<void> {
     changeDuration: setTimelinePhaseDuration,
     seek: (time) => {
       state.playing = false;
-      ($('btn-play') as HTMLButtonElement).textContent = 'Play';
+      ($('btn-play') as HTMLButtonElement).textContent = t('play');
       state.playT = Math.min(totalDuration(), Math.max(0, time));
       updatePreviewUI();
     },
@@ -1733,6 +1801,7 @@ async function init(): Promise<void> {
       renderFrame(Math.min(time, Math.max(0, totalDuration() - 0.001)), canvas, project);
     },
   });
+  applyI18n(document);
   renderSettings();
   renderMapping();
   refreshUndoRedo();
