@@ -1,0 +1,329 @@
+import type { DecodedFrame, Point, TargetSegment } from './types';
+import { traceSelectedRegion, type TraceMode, type TraceOptions } from './autoTrace';
+
+export interface CustomGifPanelCallbacks {
+  upload(file: File): void;
+  clip(start: number, endExclusive: number): void;
+  generated(segments: TargetSegment[]): void;
+  edited(segments: TargetSegment[]): void;
+  message(text: string, error?: boolean): void;
+}
+export interface CustomGifPanel {
+  reset(): void;
+  setSource(frames: DecodedFrame[], start: number, endExclusive: number): void;
+  setTargets(targets: TargetSegment[]): void;
+}
+type Tool = 'sketch' | 'edit' | 'add';
+const clamp = (n: number, a: number, b: number) => Math.min(b, Math.max(a, n));
+
+export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanelCallbacks): CustomGifPanel {
+  root.innerHTML = [
+    '<div class="custom-gif-heading"><strong>Custom GIF · target tracing</strong>',
+    '<span class="custom-gif-pill">Local processing · no API key</span></div>',
+    '<div class="custom-gif-upload"><button type="button" id="custom-upload-btn">Upload custom .gif</button>',
+    '<input type="file" id="custom-gif-file" accept="image/gif,.gif" hidden>',
+    '<span id="custom-file-label">No custom GIF selected</span></div>',
+    '<div class="custom-clip">',
+    '<label>IN frame <strong id="custom-in-value">–</strong>',
+    '<input type="range" id="custom-in" min="0" max="0" value="0" disabled></label>',
+    '<label>OUT frame <strong id="custom-out-value">–</strong>',
+    '<input type="range" id="custom-out" min="1" max="1" value="1" disabled></label>',
+    '</div><p id="custom-clip-time" class="custom-gif-help">Choose a GIF to set the clip range.</p>',
+    '<div class="custom-target-tools">',
+    '<button id="custom-sketch" class="active small" type="button">Sketch region</button>',
+    '<button id="custom-edit" class="small" type="button">Edit lines</button>',
+    '<button id="custom-add" class="small" type="button">Add line</button>',
+    '<button id="custom-delete" class="danger small" type="button" disabled>Delete selected</button>',
+    '<button id="custom-clear" class="small" type="button">Clear sketch</button>',
+    '</div>',
+    '<div class="custom-target-canvas-wrap"><canvas id="custom-target-canvas" width="256" height="256"></canvas></div>',
+    '<p class="custom-gif-help" id="custom-canvas-help">Sketch a rough loop around one object on the IN frame. The loop closes automatically.</p>',
+    '<div class="custom-trace-settings"><label>Detail <strong id="custom-detail-value">50%</strong>',
+    '<input type="range" id="custom-detail" min="0" max="100" value="50" step="5"></label>',
+    '<label>Max lines <input type="number" id="custom-max" min="3" max="200" value="42"></label>',
+    '<label>Trace <select id="custom-mode"><option value="details">Outline + inner detail</option>',
+    '<option value="outline">Outer outline only</option></select></label></div>',
+    '<div class="custom-target-actions"><button class="primary" type="button" id="custom-trace" disabled>Auto-trace selected region</button>',
+    '<span class="custom-gif-help" id="custom-target-count">0 target lines</span></div>',
+    '<p class="custom-gif-note">First version: browser-only edge-guided tracing, not an AI segmentation model. Sketch close to the object for better results. Precision changes regenerate targets; edit the lines after tuning.</p>',
+  ].join('');
+
+  const $ = <T extends HTMLElement = HTMLElement>(selector: string) => root.querySelector(selector) as T;
+  const canvas = $<HTMLCanvasElement>('#custom-target-canvas');
+  const ctx = canvas.getContext('2d')!;
+  const inRange = $<HTMLInputElement>('#custom-in');
+  const outRange = $<HTMLInputElement>('#custom-out');
+  const precisionInput = $<HTMLInputElement>('#custom-detail');
+  const maxInput = $<HTMLInputElement>('#custom-max');
+  const modeInput = $<HTMLSelectElement>('#custom-mode');
+  const traceButton = $<HTMLButtonElement>('#custom-trace');
+  const deleteButton = $<HTMLButtonElement>('#custom-delete');
+  let frames: DecodedFrame[] = [];
+  let inFrame = 0, outExclusive = 0;
+  let sketch: Point[] = [];
+  let contour: Point[] = [];
+  let targets: TargetSegment[] = [];
+  let tool: Tool = 'sketch';
+  let selected = -1;
+  let pointer: null | { kind: 'sketch' | 'add' | 'endpoint' | 'move'; index?: number;
+    which?: 'start' | 'end'; start?: Point; last?: Point } = null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  function pos(event: PointerEvent): Point {
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: clamp((event.clientX - rect.left) / rect.width, 0, 1),
+      y: clamp((event.clientY - rect.top) / rect.height, 0, 1),
+    };
+  }
+  function normalizedDistance(a: Point, b: Point): number {
+    return Math.hypot((a.x - b.x) * canvas.width, (a.y - b.y) * canvas.height);
+  }
+  function segmentDistance(p: Point, a: Point, b: Point): number {
+    const dx = (b.x - a.x) * canvas.width, dy = (b.y - a.y) * canvas.height;
+    const vx = (p.x - a.x) * canvas.width, vy = (p.y - a.y) * canvas.height;
+    const t = dx * dx + dy * dy > 0 ? clamp((vx * dx + vy * dy) / (dx * dx + dy * dy), 0, 1) : 0;
+    return Math.hypot(vx - dx * t, vy - dy * t);
+  }
+
+  function render(): void {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const frame = frames[inFrame];
+    if (frame) {
+      ctx.putImageData(frame.imageData, 0, 0);
+    } else {
+      ctx.fillStyle = '#171721';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#9a9ab0';
+      ctx.font = '14px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Upload a GIF to select its target', canvas.width / 2, canvas.height / 2);
+      ctx.textAlign = 'start';
+    }
+    const w = canvas.width, h = canvas.height;
+    if (sketch.length) {
+      ctx.beginPath();
+      sketch.forEach((p, i) => i ? ctx.lineTo(p.x * w, p.y * h) : ctx.moveTo(p.x * w, p.y * h));
+      if (!pointer || pointer.kind !== 'sketch') ctx.closePath();
+      ctx.fillStyle = 'rgba(236,72,153,.17)';
+      if (!pointer || pointer.kind !== 'sketch') ctx.fill();
+      ctx.strokeStyle = '#fb7185';
+      ctx.lineWidth = Math.max(2, w / 150);
+      ctx.setLineDash([7, 4]); ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (contour.length) {
+      ctx.beginPath();
+      contour.forEach((p, i) => i ? ctx.lineTo(p.x * w, p.y * h) : ctx.moveTo(p.x * w, p.y * h));
+      ctx.closePath();
+      ctx.strokeStyle = 'rgba(34,211,238,.85)';
+      ctx.lineWidth = Math.max(1.3, w / 270);
+      ctx.stroke();
+    }
+    targets.forEach((target, i) => {
+      ctx.beginPath();
+      ctx.moveTo(target.start.x * w, target.start.y * h);
+      ctx.lineTo(target.end.x * w, target.end.y * h);
+      ctx.strokeStyle = i === selected ? '#facc15' : '#a78bfa';
+      ctx.lineWidth = i === selected ? 4 : Math.max(2, w / 130);
+      ctx.lineCap = 'round'; ctx.stroke();
+      if (selected === i) {
+        for (const p of [target.start, target.end]) {
+          ctx.beginPath(); ctx.arc(p.x * w, p.y * h, 5, 0, 2 * Math.PI);
+          ctx.fillStyle = '#fff'; ctx.fill();
+        }
+      }
+    });
+    if (pointer?.kind === 'add' && pointer.start && pointer.last) {
+      ctx.beginPath(); ctx.moveTo(pointer.start.x * w, pointer.start.y * h);
+      ctx.lineTo(pointer.last.x * w, pointer.last.y * h);
+      ctx.strokeStyle = '#facc15'; ctx.lineWidth = 3; ctx.stroke();
+    }
+  }
+  function updateButtons(): void {
+    traceButton.disabled = frames.length === 0 || sketch.length < 3;
+    deleteButton.disabled = selected < 0 || !targets.length;
+    $('#custom-target-count').textContent = targets.length + ' target lines';
+    $('#custom-canvas-help').textContent =
+      tool === 'sketch' ? 'Sketch a closed loop around one object. Release to close it automatically.'
+      : tool === 'edit' ? 'Click a line to select it. Drag its ends or drag the line to reposition.'
+      : 'Drag on the frame to add a new target line.';
+    for (const mode of ['sketch', 'edit', 'add'] as const) {
+      $('#custom-' + mode).classList.toggle('active', tool === mode);
+    }
+  }
+  function emitEdited(): void {
+    targets.forEach((t, i) => { t.id = 't' + i; t.order = i; });
+    callbacks.edited(targets.map((t) => ({
+      ...t, start: { ...t.start }, end: { ...t.end },
+    })));
+    updateButtons(); render();
+  }
+  function trace(): void {
+    if (!frames[inFrame] || sketch.length < 3) return;
+    try {
+      const options: TraceOptions = {
+        precision: Number(precisionInput.value),
+        maximumSegments: clamp(Math.round(Number(maxInput.value) || 42), 3, 200),
+        mode: modeInput.value as TraceMode,
+      };
+      const result = traceSelectedRegion(frames[inFrame].imageData, sketch, options);
+      contour = result.contour;
+      targets = result.segments;
+      selected = -1;
+      callbacks.generated(targets.map((target) => ({ ...target })));
+      callbacks.message(result.note);
+      updateButtons(); render();
+    } catch (error) {
+      callbacks.message(error instanceof Error ? error.message : String(error), true);
+    }
+  }
+  function scheduleTrace(): void {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (sketch.length >= 3 && frames[inFrame]) trace();
+    }, 120);
+  }
+  function reset(): void {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    frames = []; inFrame = 0; outExclusive = 0; sketch = []; contour = []; targets = []; selected = -1;
+    inRange.disabled = true; outRange.disabled = true;
+    $('#custom-file-label').textContent = 'No custom GIF selected';
+    $('#custom-clip-time').textContent = 'Choose a GIF to set the clip range.';
+    $('#custom-in-value').textContent = '–'; $('#custom-out-value').textContent = '–';
+    updateButtons(); render();
+  }
+  function setSource(next: DecodedFrame[], start: number, endExclusive: number): void {
+    const changed = frames !== next || inFrame !== start;
+    frames = next;
+    inFrame = clamp(start, 0, Math.max(0, frames.length - 1));
+    outExclusive = clamp(endExclusive, inFrame + 1, Math.max(inFrame + 1, frames.length));
+    if (changed) { sketch = []; contour = []; targets = []; selected = -1; }
+    if (frames.length) {
+      canvas.width = frames[0].imageData.width;
+      canvas.height = frames[0].imageData.height;
+    }
+    inRange.disabled = !frames.length; outRange.disabled = !frames.length;
+    inRange.max = String(Math.max(0, frames.length - 1));
+    outRange.max = String(Math.max(1, frames.length));
+    outRange.min = '1'; inRange.value = String(inFrame); outRange.value = String(outExclusive);
+    $('#custom-in-value').textContent = frames.length ? '#' + inFrame : '–';
+    $('#custom-out-value').textContent = frames.length ? '#' + (outExclusive - 1) : '–';
+    const startTime = frames.slice(0, inFrame).reduce((a, f) => a + f.delaySec, 0);
+    const duration = frames.slice(inFrame, outExclusive).reduce((a, f) => a + f.delaySec, 0);
+    $('#custom-clip-time').textContent = frames.length
+      ? 'Source ' + startTime.toFixed(2) + 's → ' + (startTime + duration).toFixed(2)
+        + 's · Clip ' + duration.toFixed(2) + 's · ' + (outExclusive - inFrame) + ' frames'
+      : 'Choose a GIF to set the clip range.';
+    updateButtons(); render();
+  }
+  function setTargets(next: TargetSegment[]): void {
+    targets = next.map((t) => ({ ...t, start: { ...t.start }, end: { ...t.end } }));
+    selected = -1;
+    updateButtons(); render();
+  }
+
+  $('#custom-upload-btn').addEventListener('click', () => $<HTMLInputElement>('#custom-gif-file').click());
+  $<HTMLInputElement>('#custom-gif-file').addEventListener('change', (e) => {
+    const file = (e.target as HTMLInputElement).files?.[0];
+    if (!file) return;
+    $('#custom-file-label').textContent = file.name;
+    callbacks.upload(file);
+  });
+  const updateClip = () => {
+    if (!frames.length) return;
+    let start = Number(inRange.value), end = Number(outRange.value);
+    if (start >= end) {
+      if (document.activeElement === inRange) end = Math.min(frames.length, start + 1);
+      else start = Math.max(0, end - 1);
+    }
+    callbacks.clip(start, end);
+  };
+  inRange.addEventListener('input', updateClip);
+  outRange.addEventListener('input', updateClip);
+  for (const t of ['sketch', 'edit', 'add'] as const) {
+    $('#custom-' + t).addEventListener('click', () => {
+      tool = t; pointer = null; selected = -1; updateButtons(); render();
+    });
+  }
+  $('#custom-clear').addEventListener('click', () => {
+    sketch = []; contour = [];
+    updateButtons(); render();
+  });
+  $('#custom-delete').addEventListener('click', () => {
+    if (selected < 0) return;
+    targets.splice(selected, 1); selected = -1; emitEdited();
+  });
+  traceButton.addEventListener('click', trace);
+  precisionInput.addEventListener('input', () => {
+    $('#custom-detail-value').textContent = precisionInput.value + '%';
+    scheduleTrace();
+  });
+  maxInput.addEventListener('change', scheduleTrace);
+  modeInput.addEventListener('change', scheduleTrace);
+
+  canvas.addEventListener('pointerdown', (event) => {
+    if (!frames.length || event.button !== 0) return;
+    canvas.setPointerCapture(event.pointerId);
+    const p = pos(event);
+    if (tool === 'sketch') {
+      sketch = [p]; contour = [];
+      pointer = { kind: 'sketch' }; render();
+    } else if (tool === 'add') {
+      pointer = { kind: 'add', start: p, last: p };
+    } else {
+      let hit = -1, best = 16;
+      for (let i = 0; i < targets.length; i++) {
+        const d = segmentDistance(p, targets[i].start, targets[i].end);
+        if (d < best) { hit = i; best = d; }
+      }
+      selected = hit;
+      if (hit >= 0) {
+        const segment = targets[hit];
+        const which = normalizedDistance(p, segment.start) < 12 ? 'start'
+          : normalizedDistance(p, segment.end) < 12 ? 'end' : null;
+        pointer = which ? { kind: 'endpoint', index: hit, which } : { kind: 'move', index: hit, last: p };
+      } else pointer = null;
+      updateButtons(); render();
+    }
+  });
+  canvas.addEventListener('pointermove', (event) => {
+    if (!pointer) return;
+    const p = pos(event);
+    if (pointer.kind === 'sketch') {
+      const last = sketch[sketch.length - 1];
+      if (normalizedDistance(last, p) > 2.5) sketch.push(p);
+    } else if (pointer.kind === 'add') {
+      pointer.last = p;
+    } else if (pointer.index !== undefined) {
+      const target = targets[pointer.index];
+      if (!target) return;
+      if (pointer.kind === 'endpoint' && pointer.which) target[pointer.which] = p;
+      else if (pointer.kind === 'move' && pointer.last) {
+        const dx = p.x - pointer.last.x, dy = p.y - pointer.last.y;
+        target.start = { x: clamp(target.start.x + dx, 0, 1), y: clamp(target.start.y + dy, 0, 1) };
+        target.end = { x: clamp(target.end.x + dx, 0, 1), y: clamp(target.end.y + dy, 0, 1) };
+        pointer.last = p;
+      }
+    }
+    render();
+  });
+  canvas.addEventListener('pointerup', (event) => {
+    if (!pointer) return;
+    const p = pos(event), kind = pointer.kind;
+    if (kind === 'sketch') {
+      if (sketch.length >= 3) scheduleTrace();
+      else callbacks.message('Draw a larger closed loop around the object.', true);
+    } else if (kind === 'add' && pointer.start && normalizedDistance(pointer.start, p) >= 4) {
+      targets.push({ id: 't' + targets.length, order: targets.length, start: pointer.start, end: p });
+      emitEdited();
+    } else if (kind === 'endpoint' || kind === 'move') emitEdited();
+    pointer = null; updateButtons(); render();
+  });
+  canvas.addEventListener('pointercancel', () => {
+    pointer = null; updateButtons(); render();
+  });
+  reset();
+  return { reset, setSource, setTargets };
+}
