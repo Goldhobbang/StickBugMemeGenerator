@@ -7,7 +7,8 @@ import type {
   UserSegment,
 } from './core/types';
 import { DEFAULT_SETTINGS } from './core/types';
-import { decodeGif } from './core/gifDecoder';
+import { decodeGif, decodeGifFile } from './core/gifDecoder';
+import { mountCustomGifPanel, type CustomGifPanel } from './core/customGifPanel';
 import { computeTimeline, stageAtTime, STAGE_LABELS } from './core/timeline';
 import { distToSegmentPx, segmentLengthPx } from './core/interpolation';
 import { renderFrame, type RenderProject } from './core/renderFrame';
@@ -85,9 +86,11 @@ app.innerHTML = `
       <select id="variation-select" aria-label="Select final meme variation">
         <option value="stickbug">Stick Bug</option>
         <option value="rickroll">RickRoll</option>
+        <option value="custom">Custom GIF · Auto Trace</option>
       </select>
       <p id="variation-description"></p>
     </div>
+    <div id="custom-panel" class="custom-gif-panel" hidden></div>
     <div class="toolbar">
       <button id="btn-upload">Upload image</button>
       <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp" hidden />
@@ -144,6 +147,7 @@ const previewCanvas = $('preview') as HTMLCanvasElement;
 const statusEl = $('status');
 const segCountEl = $('seg-count');
 let timelineUI: TimelineEditor | null = null;
+let customPanel: CustomGifPanel | null = null;
 
 function setStatus(msg: string, kind: 'info' | 'error' | 'ok' = 'info'): void {
   statusEl.textContent = msg;
@@ -615,6 +619,12 @@ function renderMapping(): void {
     });
     return;
   }
+  if (TARGETS.length === 0) {
+    box.textContent = state.variation === 'custom'
+      ? 'Sketch and trace the custom GIF target before mapping lines.'
+      : 'No template targets available.';
+    return;
+  }
   const colors = ['#a855f7', '#22d3ee', '#f472b6', '#facc15', '#34d399', '#fb923c', '#818cf8', '#f87171', '#2dd4bf'];
   box.innerHTML = '';
   [...state.userSegments]
@@ -670,7 +680,7 @@ function afterSegmentsChanged(clearErr = true): void {
 function updateCounts(): void {
   const drawn = state.userSegments.length;
   const animated = effectiveSegmentCount(state.userSegments, TARGETS);
-  const clones = animated - drawn;
+  const clones = Math.max(0, animated - drawn);
   segCountEl.textContent = `Drawn: ${drawn}`;
   segCountEl.className = `seg-count ${drawn > 0 ? 'ok' : 'short'}`;
   $('seg-template').textContent = `Template: ${N}`;
@@ -686,6 +696,8 @@ function validate(): string | null {
     return 'Invalid meme start frame for the selected variation.';
   if (state.memeEndFrameExclusive <= state.memeStartFrame || state.memeEndFrameExclusive > state.decoded.frames.length)
     return 'Choose a valid source GIF end frame.';
+  if (state.variation === 'custom' && N === 0)
+    return 'Sketch the custom GIF target and generate its outline first.';
   if (!state.image) return 'Upload an image to begin.';
   if (state.userSegments.length === 0)
     return 'Draw at least one line. Missing template lines will be cloned automatically.';
@@ -1351,6 +1363,8 @@ async function selectVariation(id: VariationId): Promise<void> {
   const preset = VARIATIONS[id];
   if (!preset) return;
   const token = ++variationLoadToken;
+  $('custom-panel').hidden = id !== 'custom';
+  if (id === 'custom') customPanel?.reset();
   state.variation = id;
   state.memeStartFrame = preset.memeStartFrame;
   state.decoded = null;
@@ -1391,6 +1405,10 @@ async function selectVariation(id: VariationId): Promise<void> {
   updateCounts();
   drawEditor();
   updatePreviewUI();
+  if (id === 'custom') {
+    setStatus('Upload a custom GIF, set IN/OUT frames, then sketch around its target object.', 'info');
+    return;
+  }
   setStatus(`Loading ${preset.name} reference GIF…`, 'info');
 
   try {
@@ -1437,8 +1455,86 @@ $('variation-select').addEventListener('change', (e) => {
   void selectVariation((e.target as HTMLSelectElement).value as VariationId);
 });
 
+function applyCustomTargets(segments: TargetSegment[]): void {
+  if (state.variation !== 'custom') return;
+  TARGETS.splice(0, TARGETS.length, ...segments.map((segment, i) => ({
+    ...segment, id: 't' + i, order: i,
+    start: { ...segment.start }, end: { ...segment.end },
+  })));
+  N = TARGETS.length;
+  targetById.clear();
+  TARGETS.forEach((target) => targetById.set(target.id, target));
+  calibTargets = TARGETS.map((target) => structuredClone(target));
+  for (const stroke of state.userSegments) {
+    stroke.mappingMode = 'auto';
+    stroke.targetSegmentId = TARGETS[0]?.id ?? '';
+  }
+  state.selectedId = null;
+  afterSegmentsChanged(false);
+  setStatus(N
+    ? 'Custom target ready: ' + N + ' lines. Draw source strokes on the image editor and generate your GIF.'
+    : 'Target is empty. Draw a rough closed loop to trace it.', N ? 'ok' : 'info');
+}
+
+function updateCustomClip(start: number, endExclusive: number): void {
+  if (state.variation !== 'custom' || !state.decoded) return;
+  const frameCount = state.decoded.frames.length;
+  const nextStart = Math.max(0, Math.min(frameCount - 1, start));
+  const nextEnd = Math.max(nextStart + 1, Math.min(frameCount, endExclusive));
+  const changedStart = state.memeStartFrame !== nextStart;
+  state.memeStartFrame = nextStart;
+  state.memeEndFrameExclusive = nextEnd;
+  state.playT = Math.min(state.playT, totalDuration());
+  if (changedStart) {
+    // A target outline is bound to the chosen IN frame, never to a stale frame.
+    applyCustomTargets([]);
+  }
+  customPanel?.setSource(state.decoded.frames, nextStart, nextEnd);
+  updateTimingSummary();
+  updatePreviewUI();
+  updateGenerateButton();
+  if (changedStart) setStatus('IN frame changed. Sketch this frame to generate a new target outline.', 'info');
+}
+
+async function uploadCustomGif(file: File): Promise<void> {
+  if (state.variation !== 'custom') return;
+  const token = ++variationLoadToken;
+  state.refError = null;
+  setStatus('Decoding custom GIF locally…', 'info');
+  try {
+    const decoded = await decodeGifFile(file);
+    if (token !== variationLoadToken || state.variation !== 'custom') return;
+    state.decoded = decoded;
+    state.memeStartFrame = 0;
+    state.memeEndFrameExclusive = decoded.frames.length;
+    state.playT = 0;
+    applyCustomTargets([]);
+    customPanel?.setSource(decoded.frames, 0, decoded.frames.length);
+    fitEditorCanvas();
+    drawEditor();
+    renderMapping();
+    updateTimingSummary();
+    updatePreviewUI();
+    updateGenerateButton();
+    setStatus('Loaded ' + file.name + ': ' + decoded.frames.length +
+      ' frames, ' + decoded.totalSec.toFixed(2) + 's. Sketch around your target on the IN frame.', 'ok');
+  } catch (error) {
+    if (token !== variationLoadToken) return;
+    state.refError = error instanceof Error ? error.message : String(error);
+    setStatus('Custom GIF failed: ' + state.refError, 'error');
+    updateGenerateButton();
+  }
+}
+
 async function init(): Promise<void> {
   fitEditorCanvas();
+  customPanel = mountCustomGifPanel($('custom-panel'), {
+    upload: (file) => { void uploadCustomGif(file); },
+    clip: updateCustomClip,
+    generated: applyCustomTargets,
+    edited: applyCustomTargets,
+    message: (msg, error) => setStatus(msg, error ? 'error' : 'ok'),
+  });
   timelineUI = mountTimelineEditor($('timeline-editor'), {
     phases: timelinePhases,
     playhead: () => state.playT,
