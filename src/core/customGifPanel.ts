@@ -1,5 +1,6 @@
 import type { DecodedFrame, Point, TargetSegment } from './types';
-import { traceSelectedRegion, type TraceMode, type TraceOptions } from './autoTrace';
+import { traceSelectedRegion, traceSegmentationMask, type TraceMode, type TraceOptions } from './autoTrace';
+import { segmentObjectFromSketch, type ModelMask } from './onDeviceSegmentation';
 
 export interface CustomGifPanelCallbacks {
   upload(file: File): void;
@@ -43,9 +44,10 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     '<label>Max lines <input type="number" id="custom-max" min="3" max="200" value="42"></label>',
     '<label>Trace <select id="custom-mode"><option value="details">Outline + inner detail</option>',
     '<option value="outline">Outer outline only</option></select></label></div>',
-    '<div class="custom-target-actions"><button class="primary" type="button" id="custom-trace" disabled>Auto-trace selected region</button>',
+    '<div class="custom-target-actions"><button class="primary" type="button" id="custom-trace" disabled>Local edge trace</button>',
+    '<button type="button" id="custom-ai-trace" disabled>AI refine object</button>',
     '<span class="custom-gif-help" id="custom-target-count">0 target lines</span></div>',
-    '<p class="custom-gif-note">First version: browser-only edge-guided tracing, not an AI segmentation model. Sketch close to the object for better results. Precision changes regenerate targets; edit the lines after tuning.</p>',
+    '<p class="custom-gif-note">Local trace works offline. AI refine downloads the free MagicTouch model once and segments the object on your device (no API key). If AI cannot recognize the object, local trace remains available. Precision changes regenerate lines; edit them afterward.</p>',
   ].join('');
 
   const $ = <T extends HTMLElement = HTMLElement>(selector: string) => root.querySelector(selector) as T;
@@ -57,12 +59,16 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
   const maxInput = $<HTMLInputElement>('#custom-max');
   const modeInput = $<HTMLSelectElement>('#custom-mode');
   const traceButton = $<HTMLButtonElement>('#custom-trace');
+  const aiButton = $<HTMLButtonElement>('#custom-ai-trace');
   const deleteButton = $<HTMLButtonElement>('#custom-delete');
   let frames: DecodedFrame[] = [];
   let inFrame = 0, outExclusive = 0;
   let sketch: Point[] = [];
   let contour: Point[] = [];
   let targets: TargetSegment[] = [];
+  let learnedMask: ModelMask | null = null;
+  let aiRequestId = 0;
+  let aiBusy = false;
   let tool: Tool = 'sketch';
   let selected = -1;
   let pointer: null | { kind: 'sketch' | 'add' | 'endpoint' | 'move'; index?: number;
@@ -141,6 +147,8 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
   }
   function updateButtons(): void {
     traceButton.disabled = frames.length === 0 || sketch.length < 3;
+    aiButton.disabled = frames.length === 0 || sketch.length < 3 || aiBusy;
+    aiButton.textContent = aiBusy ? 'Loading AI model…' : learnedMask ? 'AI mask active · re-run' : 'AI refine object';
     deleteButton.disabled = selected < 0 || !targets.length;
     $('#custom-target-count').textContent = targets.length + ' target lines';
     $('#custom-canvas-help').textContent =
@@ -166,7 +174,9 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
         maximumSegments: clamp(Math.round(Number(maxInput.value) || 42), 3, 200),
         mode: modeInput.value as TraceMode,
       };
-      const result = traceSelectedRegion(frames[inFrame].imageData, sketch, options);
+      const result = learnedMask
+        ? traceSegmentationMask(frames[inFrame].imageData, learnedMask.values, learnedMask.width, learnedMask.height, options)
+        : traceSelectedRegion(frames[inFrame].imageData, sketch, options);
       contour = result.contour;
       targets = result.segments;
       selected = -1;
@@ -188,6 +198,7 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
     frames = []; inFrame = 0; outExclusive = 0; sketch = []; contour = []; targets = []; selected = -1;
+    aiRequestId++; learnedMask = null; aiBusy = false;
     inRange.disabled = true; outRange.disabled = true;
     $('#custom-file-label').textContent = 'No custom GIF selected';
     $('#custom-clip-time').textContent = 'Choose a GIF to set the clip range.';
@@ -199,7 +210,7 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     frames = next;
     inFrame = clamp(start, 0, Math.max(0, frames.length - 1));
     outExclusive = clamp(endExclusive, inFrame + 1, Math.max(inFrame + 1, frames.length));
-    if (changed) { sketch = []; contour = []; targets = []; selected = -1; }
+    if (changed) { sketch = []; contour = []; targets = []; selected = -1; learnedMask = null; aiRequestId++; aiBusy = false; }
     if (frames.length) {
       canvas.width = frames[0].imageData.width;
       canvas.height = frames[0].imageData.height;
@@ -248,14 +259,44 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     });
   }
   $('#custom-clear').addEventListener('click', () => {
-    sketch = []; contour = [];
+    sketch = []; contour = []; learnedMask = null; aiRequestId++;
     updateButtons(); render();
   });
   $('#custom-delete').addEventListener('click', () => {
     if (selected < 0) return;
     targets.splice(selected, 1); selected = -1; emitEdited();
   });
-  traceButton.addEventListener('click', trace);
+  traceButton.addEventListener('click', () => {
+    learnedMask = null;
+    trace();
+  });
+  aiButton.addEventListener('click', async () => {
+    const frame = frames[inFrame];
+    if (!frame || sketch.length < 3 || aiBusy) return;
+    const request = ++aiRequestId;
+    aiBusy = true;
+    updateButtons();
+    callbacks.message('Downloading/initializing the on-device MagicTouch model…');
+    try {
+      // Yield to paint the loading state before model loading and inference.
+      await new Promise<void>((resolve) => setTimeout(resolve, 30));
+      const mask = await segmentObjectFromSketch(frame.imageData, sketch);
+      if (request !== aiRequestId || frames[inFrame] !== frame) return;
+      learnedMask = mask;
+      trace();
+    } catch (error) {
+      if (request !== aiRequestId) return;
+      learnedMask = null;
+      callbacks.message('AI inference unavailable: ' +
+        (error instanceof Error ? error.message : String(error)) +
+        '. Local edge tracing still works.', true);
+    } finally {
+      if (request === aiRequestId) {
+        aiBusy = false;
+        updateButtons();
+      }
+    }
+  });
   precisionInput.addEventListener('input', () => {
     $('#custom-detail-value').textContent = precisionInput.value + '%';
     scheduleTrace();
@@ -268,7 +309,7 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     canvas.setPointerCapture(event.pointerId);
     const p = pos(event);
     if (tool === 'sketch') {
-      sketch = [p]; contour = [];
+      sketch = [p]; contour = []; learnedMask = null; aiRequestId++;
       pointer = { kind: 'sketch' }; render();
     } else if (tool === 'add') {
       pointer = { kind: 'add', start: p, last: p };
