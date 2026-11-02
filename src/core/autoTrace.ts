@@ -137,9 +137,9 @@ function insideMask(points: P[], w: number, h: number): Uint8Array {
   return mask;
 }
 interface Candidate { a: P; b: P; score: number }
-function internalLines(gradient: Float32Array, outline: P[], w: number, h: number, precision: number, max: number): Candidate[] {
+function internalLines(gradient: Float32Array, outline: P[], w: number, h: number, precision: number, max: number, providedMask?: Uint8Array): Candidate[] {
   if (max <= 0 || precision <= 20) return [];
-  const mask = insideMask(outline, w, h);
+  const mask = providedMask ?? insideMask(outline, w, h);
   const threshold = 33 + (100 - precision) * .76;
   const minLength = 5 + Math.pow((100 - precision) / 100, 1.4) * 18;
   const found: Candidate[] = [];
@@ -234,5 +234,120 @@ export function traceSelectedRegion(frame: ImageData, roughPolygon: Point[], opt
     segments: targets,
     contour: dense.map(normalize),
     note: 'Local edge tracing: ' + targets.length + ' lines (' + (targets.length - extra.length) + ' outline, ' + extra.length + ' details).',
+  };
+}
+
+
+/**
+ * Convert a learned model's foreground confidence mask to the same editable
+ * line data as local tracing. AI selects the object; precision controls the
+ * VECTOR tracing step, not model inference confidence.
+ */
+export function traceSegmentationMask(
+  frame: ImageData,
+  modelMask: Float32Array,
+  modelWidth: number,
+  modelHeight: number,
+  options: TraceOptions,
+): TraceResult {
+  if (modelMask.length !== modelWidth * modelHeight)
+    throw new Error('AI segmentation mask dimensions are invalid.');
+  const precision = clamp(options.precision, 0, 100);
+  const maxSegments = Math.round(clamp(options.maximumSegments, 3, 200));
+  const scale = Math.min(1, 512 / Math.max(frame.width, frame.height));
+  const w = Math.max(16, Math.round(frame.width * scale));
+  const h = Math.max(16, Math.round(frame.height * scale));
+  const binary = new Uint8Array(w * h);
+  let foreground = 0;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const mx = Math.min(modelWidth - 1, Math.floor(x * modelWidth / w));
+    const my = Math.min(modelHeight - 1, Math.floor(y * modelHeight / h));
+    const selected = modelMask[my * modelWidth + mx] >= .5 ? 1 : 0;
+    binary[y * w + x] = selected;
+    foreground += selected;
+  }
+  if (foreground < 20 || foreground > .97 * w * h)
+    throw new Error('AI could not isolate the selected object. Adjust your sketch or use local tracing.');
+
+  // For each foreground pixel, emit clockwise directed edges at transitions.
+  // The longest closed loop corresponds to the main silhouette. Interior
+  // holes are intentionally ignored for outer-boundary reconstruction.
+  const stride = w + 1;
+  const next = new Map<number, number[]>();
+  const edge = (ax: number, ay: number, bx: number, by: number) => {
+    const a = ay * stride + ax, b = by * stride + bx;
+    const list = next.get(a);
+    if (list) list.push(b);
+    else next.set(a, [b]);
+  };
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = y * w + x;
+    if (!binary[i]) continue;
+    if (y === 0 || !binary[i - w]) edge(x, y, x + 1, y);
+    if (x === w - 1 || !binary[i + 1]) edge(x + 1, y, x + 1, y + 1);
+    if (y === h - 1 || !binary[i + w]) edge(x + 1, y + 1, x, y + 1);
+    if (x === 0 || !binary[i - 1]) edge(x, y + 1, x, y);
+  }
+
+  let largest: P[] = [];
+  let largestArea = 0;
+  for (const [first, edges] of next) {
+    while (edges.length) {
+      const ring: P[] = [];
+      let at = first, closed = false, steps = 0;
+      while (steps++ < w * h * 4) {
+        ring.push({ x: at % stride, y: Math.floor(at / stride) });
+        const choices = next.get(at);
+        if (!choices?.length) break;
+        at = choices.pop()!;
+        if (at === first) { closed = true; break; }
+      }
+      if (closed && ring.length >= 3) {
+        const area = Math.abs(signedArea(ring));
+        if (area > largestArea) { largestArea = area; largest = ring; }
+      }
+    }
+  }
+  if (largest.length < 3 || largestArea < 50)
+    throw new Error('AI mask has no usable object outline.');
+  let epsilon = .6 + Math.pow((100 - precision) / 100, 1.8) * 16;
+  let simple = simplifyClosed(largest, epsilon);
+  const budget = options.mode === 'outline' ? maxSegments : Math.max(3, Math.floor(maxSegments * .72));
+  while (simple.length > budget && epsilon < 100) {
+    epsilon = epsilon * 1.23 + .3;
+    simple = simplifyClosed(largest, epsilon);
+  }
+
+  const normalize = (p: P): Point => ({
+    x: clamp(p.x / w, 0, 1), y: clamp(p.y / h, 0, 1),
+  });
+  const targets: TargetSegment[] = [];
+  simple.forEach((p, i) => {
+    const q = simple[(i + 1) % simple.length];
+    if (dist(p, q) < 1.2) return;
+    targets.push({ id: 't' + targets.length, order: targets.length,
+      start: normalize(p), end: normalize(q) });
+  });
+  const source = document.createElement('canvas');
+  source.width = frame.width; source.height = frame.height;
+  source.getContext('2d')!.putImageData(frame, 0, 0);
+  const small = document.createElement('canvas');
+  small.width = w; small.height = h;
+  const ctx = small.getContext('2d', { willReadFrequently: true })!;
+  ctx.drawImage(source, 0, 0, w, h);
+  const gradients = gradientOf(ctx.getImageData(0, 0, w, h));
+  const details = options.mode === 'details'
+    ? internalLines(gradients, largest, w, h, precision, maxSegments - targets.length, binary)
+    : [];
+  details.forEach(({ a, b }) => {
+    targets.push({ id: 't' + targets.length, order: targets.length,
+      start: normalize(a), end: normalize(b) });
+  });
+  if (targets.length < 3) throw new Error('AI found too few outline segments. Try local tracing.');
+  return {
+    segments: targets,
+    contour: largest.map(normalize),
+    note: 'On-device AI segmentation: ' + targets.length +
+      ' editable lines (' + (targets.length - details.length) + ' outline, ' + details.length + ' details).',
   };
 }
