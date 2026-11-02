@@ -16,7 +16,7 @@ export function computeTimeline(
   settings: Settings,
   memeDuration: number,
 ): Timeline {
-  const revealDuration = segmentCount * settings.revealInterval;
+  const revealDuration = segmentCount > 0 ? Math.max(0, settings.revealTotalDuration) : 0;
   const phaseAEnd = revealDuration;
   const phaseBEnd = phaseAEnd + settings.holdAfterReveal;
   const phaseCEnd = phaseBEnd + settings.grayHold;
