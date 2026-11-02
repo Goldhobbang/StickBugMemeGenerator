@@ -122,6 +122,7 @@ canvas.editor.select-mode { cursor: default; }
 .seg-count { font-variant-numeric: tabular-nums; font-weight: 600; }
 .seg-count.ok { color: var(--ok); }
 .seg-count.short { color: var(--accent); }
+.seg-count.template-count { color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 4px 7px; background: var(--panel-2); }
 
 .mapping-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow: auto; margin-top: 10px; }
 .mapping-row {
