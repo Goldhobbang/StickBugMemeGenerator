@@ -792,6 +792,7 @@ function renderSettings(): void {
         drawEditor();
         updateTimingSummary();
         updatePreviewUI();
+        updateGenerateButton();
       }
     });
   num('set-reveal', (v) => (state.settings.revealTotalDuration = Math.min(30, Math.max(0, v))));
@@ -958,6 +959,7 @@ async function runExport(): Promise<void> {
   }
   if (state.exporting) return;
   state.exporting = true;
+  ($('variation-select') as HTMLSelectElement).disabled = true;
   updateGenerateButton();
   $('btn-cancel').style.display = '';
   $('progress').classList.add('show');
@@ -986,6 +988,7 @@ async function runExport(): Promise<void> {
     setStatus(`Export failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
   } finally {
     state.exporting = false;
+    ($('variation-select') as HTMLSelectElement).disabled = false;
     $('btn-cancel').style.display = 'none';
     $('progress').classList.remove('show');
     updateGenerateButton();
@@ -1164,7 +1167,7 @@ document.addEventListener('keydown', (e) => {
     refreshUndoRedo();
   } else if (e.key === ' ') {
     const ae = document.activeElement as HTMLElement | null;
-    if (ae && (ae.tagName === 'BUTTON' || ae.tagName === 'A')) return;
+    if (ae && ['BUTTON', 'A', 'INPUT', 'SELECT', 'TEXTAREA'].includes(ae.tagName)) return;
     e.preventDefault();
     ($('btn-play') as HTMLButtonElement).click();
   }
