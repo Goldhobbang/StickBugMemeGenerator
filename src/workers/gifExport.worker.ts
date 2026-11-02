@@ -26,10 +26,12 @@ self.onmessage = (e: MessageEvent<ExportRequest>) => {
       (self as unknown as Worker).postMessage({ type: 'progress', done: i + 1, total });
     }
     gif.finish();
-    const bytes = gif.bytes();
+    // gifenc may return a view onto an oversized internal buffer.
+    // Transfer only the actual GIF bytes, not unused buffer capacity.
+    const bytes = gif.bytes().slice();
     (self as unknown as Worker).postMessage(
       { type: 'done', buffer: bytes.buffer },
-      { transfer: [bytes.buffer] } as StructuredSerializeOptions,
+      [bytes.buffer],
     );
   } catch (err) {
     (self as unknown as Worker).postMessage({
