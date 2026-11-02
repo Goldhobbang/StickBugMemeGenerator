@@ -111,6 +111,23 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
       ctx.textAlign = 'start';
     }
     const w = canvas.width, h = canvas.height;
+    if (learnedMask && learnedMask.width > 0 && learnedMask.height > 0) {
+      const overlay = document.createElement('canvas');
+      overlay.width = learnedMask.width; overlay.height = learnedMask.height;
+      const overlayContext = overlay.getContext('2d')!;
+      const pixels = overlayContext.createImageData(overlay.width, overlay.height);
+      for (let i = 0; i < learnedMask.values.length; i++) {
+        const confidence = learnedMask.values[i];
+        if (confidence < .5) continue;
+        const offset = i * 4;
+        pixels.data[offset] = 34;
+        pixels.data[offset + 1] = 211;
+        pixels.data[offset + 2] = 238;
+        pixels.data[offset + 3] = 55;
+      }
+      overlayContext.putImageData(pixels, 0, 0);
+      ctx.drawImage(overlay, 0, 0, w, h);
+    }
     if (sketch.length) {
       ctx.beginPath();
       sketch.forEach((p, i) => i ? ctx.lineTo(p.x * w, p.y * h) : ctx.moveTo(p.x * w, p.y * h));
