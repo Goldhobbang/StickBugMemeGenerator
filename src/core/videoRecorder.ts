@@ -114,6 +114,9 @@ export async function recordProjectVideo(options: RecordVideoOptions): Promise<{
     resolveBlob = resolve;
     rejectBlob = reject;
   });
+  // A recorder error may arrive before the frame loop reaches its await.
+  // Attach a handler now to prevent an unhandled promise rejection.
+  void blobPromise.catch(() => undefined);
   recorder.ondataavailable = (e: BlobEvent) => { if (e.data.size) chunks.push(e.data); };
   recorder.onerror = () => rejectBlob(new Error('Browser video encoder failed.'));
   recorder.onstop = () => {
@@ -125,6 +128,10 @@ export async function recordProjectVideo(options: RecordVideoOptions): Promise<{
   };
 
   try {
+    // Mounted (but visually unobtrusive) canvases are more reliable as
+    // capture sources on WebKit and mobile browsers.
+    canvas.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0.001;pointer-events:none;z-index:-1';
+    document.body.appendChild(canvas);
     renderFrame(0, canvas, project);
     recorder.start(500);
     const started = performance.now();
@@ -148,5 +155,6 @@ export async function recordProjectVideo(options: RecordVideoOptions): Promise<{
   } finally {
     track.stop();
     stream.getTracks().forEach((t) => t.stop());
+    canvas.remove();
   }
 }
