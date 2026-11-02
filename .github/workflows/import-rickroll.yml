@@ -4,6 +4,8 @@ on:
   push:
     paths:
       - '.github/workflows/import-rickroll.yml'
+      - 'scripts/analyze_rickroll.py'
+      - 'scripts/prepare_rickroll.py'
   workflow_dispatch:
 
 permissions:
