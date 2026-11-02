@@ -116,6 +116,40 @@ canvas.editor.select-mode { cursor: default; }
 details.settings { margin-top: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
 details.settings summary { cursor: pointer; color: var(--muted); font-size: 14px; }
 
+.timing-summary {
+  margin: 10px 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-2);
+  padding: 9px 10px;
+  line-height: 1.5;
+  color: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.settings-section-title {
+  grid-column: 1 / -1;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.035em;
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.settings-grid label {
+  line-height: 1.4;
+}
+.settings-grid input[type='number'] {
+  width: 100%;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 520px) {
+  .settings-grid { grid-template-columns: 1fr; }
+}
+
+
 .status { font-size: 13px; min-height: 20px; margin-top: 8px; }
 .status.error { color: #fca5a5; }
 .status.ok { color: #86efac; }
