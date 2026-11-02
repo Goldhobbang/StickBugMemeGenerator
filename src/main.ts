@@ -7,12 +7,13 @@ import type {
   UserSegment,
 } from './core/types';
 import { DEFAULT_SETTINGS } from './core/types';
-import { decodeGif, memeDurationFrom } from './core/gifDecoder';
+import { decodeGif } from './core/gifDecoder';
 import { computeTimeline, stageAtTime, STAGE_LABELS } from './core/timeline';
 import { distToSegmentPx, segmentLengthPx } from './core/interpolation';
 import { renderFrame, type RenderProject } from './core/renderFrame';
 import { autoAssignTargets, buildEffectiveSegments, coveredTargetCount, effectiveSegmentCount } from './core/segmentMapping';
 import { VARIATIONS, type VariationId } from './core/variations';
+import { mountTimelineEditor, type PhaseId, type PhaseSpec, type TimelineEditor } from './core/timelineEditor';
 
 // ---------------------------------------------------------------- state
 
@@ -27,6 +28,8 @@ interface AppState {
   settings: Settings;
   decoded: { width: number; height: number; frames: DecodedFrame[] } | null;
   memeStartFrame: number;
+  /** Exclusive end frame of selected original meme footage. */
+  memeEndFrameExclusive: number;
   playing: boolean;
   playT: number;
   lastTick: number;
@@ -48,6 +51,7 @@ const state: AppState = {
   settings: { ...DEFAULT_SETTINGS },
   decoded: null,
   memeStartFrame: VARIATIONS.stickbug.memeStartFrame,
+  memeEndFrameExclusive: 0,
   playing: false,
   playT: 0,
   lastTick: 0,
@@ -107,6 +111,9 @@ app.innerHTML = `
     <h2>Animation Preview</h2>
     <div class="stage-badge" id="stage">–</div>
     <canvas id="preview" class="preview-canvas" width="440" height="248"></canvas>
+    <section class="timeline-panel" aria-label="Entire GIF timeline">
+      <div id="timeline-editor" class="timeline-editor"></div>
+    </section>
     <div class="seek-row">
       <button id="btn-play" class="small">Play</button>
       <button id="btn-restart" class="small">Restart</button>
@@ -136,6 +143,7 @@ const editorCanvas = $('editor') as HTMLCanvasElement;
 const previewCanvas = $('preview') as HTMLCanvasElement;
 const statusEl = $('status');
 const segCountEl = $('seg-count');
+let timelineUI: TimelineEditor | null = null;
 
 function setStatus(msg: string, kind: 'info' | 'error' | 'ok' = 'info'): void {
   statusEl.textContent = msg;
@@ -144,13 +152,52 @@ function setStatus(msg: string, kind: 'info' | 'error' | 'ok' = 'info'): void {
 
 // ---------------------------------------------------------------- project for renderer
 
-function buildProject(): RenderProject | null {
-  if (!state.decoded) return null;
-  const memeFrames = state.decoded.frames;
-  let memeDuration = 0;
-  for (let i = state.memeStartFrame; i < memeFrames.length; i++) {
-    memeDuration += memeFrames[i].delaySec;
+/**
+ * Source GIF playback is trimmed at original frame boundaries. Every chosen
+ * source frame retains its original centisecond delay in both preview/export.
+ */
+function memeDurationThrough(endIndex: number): number {
+  if (!state.decoded) return 0;
+  let centiseconds = 0;
+  const end = Math.min(state.decoded.frames.length, Math.max(state.memeStartFrame, endIndex));
+  for (let i = state.memeStartFrame; i < end; i++)
+    centiseconds += state.decoded.frames[i].delayCs;
+  return centiseconds / 100;
+}
+
+function memeFullDuration(): number {
+  return state.decoded ? memeDurationThrough(state.decoded.frames.length) : 0;
+}
+
+function selectedMemeDuration(): number {
+  return memeDurationThrough(state.memeEndFrameExclusive);
+}
+
+function firstMemeFrameDuration(): number {
+  return state.decoded?.frames[state.memeStartFrame]?.delaySec ?? 0;
+}
+
+/** Snap a requested clip length to the closest complete source frame. */
+function setMemePlaybackSeconds(requestedSeconds: number): void {
+  if (!state.decoded) return;
+  const frames = state.decoded.frames;
+  const targetCs = Math.round(requestedSeconds * 100);
+  let sumCs = 0;
+  let bestDifference = Number.POSITIVE_INFINITY;
+  let bestEnd = state.memeStartFrame + 1;
+  for (let i = state.memeStartFrame; i < frames.length; i++) {
+    sumCs += frames[i].delayCs;
+    const difference = Math.abs(sumCs - targetCs);
+    if (difference < bestDifference) {
+      bestDifference = difference;
+      bestEnd = i + 1;
+    }
   }
+  state.memeEndFrameExclusive = bestEnd;
+}
+
+function buildProject(): RenderProject | null {
+  if (!state.decoded || state.memeEndFrameExclusive <= state.memeStartFrame) return null;
   return {
     image: state.image,
     userSegments: buildEffectiveSegments(state.userSegments, TARGETS),
@@ -159,25 +206,19 @@ function buildProject(): RenderProject | null {
     settings: state.settings,
     gifWidth: state.decoded.width,
     gifHeight: state.decoded.height,
-    memeFrames,
+    memeFrames: state.decoded.frames,
     memeStartIndex: state.memeStartFrame,
-    memeDuration,
+    memeEndIndex: state.memeEndFrameExclusive,
+    memeDuration: selectedMemeDuration(),
   };
 }
 
 function totalDuration(): number {
-  const memeDur = state.decoded
-    ? memeDurationFrom(
-        {
-          width: state.decoded.width,
-          height: state.decoded.height,
-          frames: state.decoded.frames,
-          totalSec: 0,
-        },
-        state.memeStartFrame,
-      )
-    : 0;
-  return computeTimeline(effectiveSegmentCount(state.userSegments, TARGETS), state.settings, memeDur).total;
+  return computeTimeline(
+    effectiveSegmentCount(state.userSegments, TARGETS),
+    state.settings,
+    selectedMemeDuration(),
+  ).total;
 }
 
 // ---------------------------------------------------------------- editor canvas
@@ -643,6 +684,8 @@ function validate(): string | null {
   if (!state.decoded) return 'Reference GIF still loading…';
   if (state.memeStartFrame < 0 || state.memeStartFrame >= state.decoded.frames.length)
     return 'Invalid meme start frame for the selected variation.';
+  if (state.memeEndFrameExclusive <= state.memeStartFrame || state.memeEndFrameExclusive > state.decoded.frames.length)
+    return 'Choose a valid source GIF end frame.';
   if (!state.image) return 'Upload an image to begin.';
   if (state.userSegments.length === 0)
     return 'Draw at least one line. Missing template lines will be cloned automatically.';
@@ -655,7 +698,7 @@ function validate(): string | null {
   // out-of-memory failures when combining long footage with 2×/4× output.
   const introSec = computeTimeline(animatedSegments.length, state.settings, 0).phaseEEnd;
   const frameEstimate = Math.ceil(introSec * state.settings.outputFps)
-    + (state.decoded.frames.length - state.memeStartFrame);
+    + (state.memeEndFrameExclusive - state.memeStartFrame);
   const scale = state.settings.exportScale;
   const rawByteEstimate = frameEstimate * state.decoded.width * scale
     * state.decoded.height * scale * 4;
@@ -950,7 +993,7 @@ function collectExportFrames(): {
   // timing: each source frame keeps its own delay. At 1x, pixel data is
   // copied without smoothing (nearest-neighbor path in renderFrame).
   const blit = document.createElement('canvas');
-  for (let i = state.memeStartFrame; i < proj.memeFrames.length; i++) {
+  for (let i = state.memeStartFrame; i < proj.memeEndIndex; i++) {
     const f = proj.memeFrames[i];
     blit.width = f.imageData.width;
     blit.height = f.imageData.height;
@@ -1225,6 +1268,7 @@ async function selectVariation(id: VariationId): Promise<void> {
   state.variation = id;
   state.memeStartFrame = preset.memeStartFrame;
   state.decoded = null;
+  state.memeEndFrameExclusive = 0;
   state.refError = null;
   state.playing = false;
   state.playT = 0;
@@ -1287,6 +1331,7 @@ async function selectVariation(id: VariationId): Promise<void> {
     }
     if (token !== variationLoadToken) return;
     state.decoded = decoded;
+    state.memeEndFrameExclusive = decoded.frames.length;
     fitEditorCanvas();
     drawEditor();
     renderMapping();
