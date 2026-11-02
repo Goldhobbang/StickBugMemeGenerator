@@ -1,6 +1,6 @@
 import type { DecodedFrame, Point, TargetSegment } from './types';
 import { traceSelectedRegion, traceSegmentationMask, type TraceMode, type TraceOptions } from './autoTrace';
-import { segmentObjectFromSketch, type ModelMask } from './onDeviceSegmentation';
+import { segmentObjectFromSketch, type ModelMask, type SegmentationCorrection } from './onDeviceSegmentation';
 
 export interface CustomGifPanelCallbacks {
   upload(file: File): void;
@@ -14,7 +14,7 @@ export interface CustomGifPanel {
   setSource(frames: DecodedFrame[], start: number, endExclusive: number): void;
   setTargets(targets: TargetSegment[]): void;
 }
-type Tool = 'sketch' | 'edit' | 'add';
+type Tool = 'sketch' | 'edit' | 'add' | 'include' | 'exclude';
 const clamp = (n: number, a: number, b: number) => Math.min(b, Math.max(a, n));
 
 export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanelCallbacks): CustomGifPanel {
@@ -34,6 +34,9 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     '<button id="custom-sketch" class="active small" type="button">Sketch region</button>',
     '<button id="custom-edit" class="small" type="button">Edit lines</button>',
     '<button id="custom-add" class="small" type="button">Add line</button>',
+    '<button id="custom-include" class="small" type="button">Include object point</button>',
+    '<button id="custom-exclude" class="small" type="button">Exclude background point</button>',
+    '<button id="custom-undo-prompt" class="small" type="button">Undo AI hint</button>',
     '<button id="custom-delete" class="danger small" type="button" disabled>Delete selected</button>',
     '<button id="custom-clear" class="small" type="button">Clear sketch</button>',
     '</div>',
@@ -67,6 +70,7 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
   let contour: Point[] = [];
   let targets: TargetSegment[] = [];
   let learnedMask: ModelMask | null = null;
+  let corrections: SegmentationCorrection[] = [];
   let aiRequestId = 0;
   let aiBusy = false;
   let tool: Tool = 'sketch';
@@ -125,6 +129,10 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
       ctx.lineWidth = Math.max(1.3, w / 270);
       ctx.stroke();
     }
+    corrections.forEach(({ point, positive }) => {
+      ctx.beginPath(); ctx.arc(point.x * w, point.y * h, 6, 0, 2 * Math.PI);
+      ctx.fillStyle = positive ? '#22c55e' : '#ef4444'; ctx.fill();
+    });
     targets.forEach((target, i) => {
       ctx.beginPath();
       ctx.moveTo(target.start.x * w, target.start.y * h);
@@ -154,8 +162,10 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     $('#custom-canvas-help').textContent =
       tool === 'sketch' ? 'Sketch a closed loop around one object. Release to close it automatically.'
       : tool === 'edit' ? 'Click a line to select it. Drag its ends or drag the line to reposition.'
-      : 'Drag on the frame to add a new target line.';
-    for (const mode of ['sketch', 'edit', 'add'] as const) {
+      : tool === 'add' ? 'Drag on the frame to add a new target line.'
+      : tool === 'include' ? 'Tap points to include in the AI mask; run AI refine again.'
+      : 'Tap points to exclude from the AI mask; run AI refine again.';
+    for (const mode of ['sketch', 'edit', 'add', 'include', 'exclude'] as const) {
       $('#custom-' + mode).classList.toggle('active', tool === mode);
     }
   }
@@ -198,7 +208,7 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
     frames = []; inFrame = 0; outExclusive = 0; sketch = []; contour = []; targets = []; selected = -1;
-    aiRequestId++; learnedMask = null; aiBusy = false;
+    aiRequestId++; learnedMask = null; aiBusy = false; corrections = [];
     inRange.disabled = true; outRange.disabled = true;
     $('#custom-file-label').textContent = 'No custom GIF selected';
     $('#custom-clip-time').textContent = 'Choose a GIF to set the clip range.';
@@ -210,7 +220,7 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     frames = next;
     inFrame = clamp(start, 0, Math.max(0, frames.length - 1));
     outExclusive = clamp(endExclusive, inFrame + 1, Math.max(inFrame + 1, frames.length));
-    if (changed) { sketch = []; contour = []; targets = []; selected = -1; learnedMask = null; aiRequestId++; aiBusy = false; }
+    if (changed) { sketch = []; contour = []; targets = []; selected = -1; learnedMask = null; aiRequestId++; aiBusy = false; corrections = []; }
     if (frames.length) {
       canvas.width = frames[0].imageData.width;
       canvas.height = frames[0].imageData.height;
@@ -253,14 +263,17 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
   };
   inRange.addEventListener('input', updateClip);
   outRange.addEventListener('input', updateClip);
-  for (const t of ['sketch', 'edit', 'add'] as const) {
+  for (const t of ['sketch', 'edit', 'add', 'include', 'exclude'] as const) {
     $('#custom-' + t).addEventListener('click', () => {
       tool = t; pointer = null; selected = -1; updateButtons(); render();
     });
   }
   $('#custom-clear').addEventListener('click', () => {
-    sketch = []; contour = []; learnedMask = null; aiRequestId++;
+    sketch = []; contour = []; learnedMask = null; aiRequestId++; corrections = [];
     updateButtons(); render();
+  });
+  $('#custom-undo-prompt').addEventListener('click', () => {
+    if (corrections.length) { corrections.pop(); learnedMask = null; aiRequestId++; updateButtons(); render(); }
   });
   $('#custom-delete').addEventListener('click', () => {
     if (selected < 0) return;
@@ -280,7 +293,7 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     try {
       // Yield to paint the loading state before model loading and inference.
       await new Promise<void>((resolve) => setTimeout(resolve, 30));
-      const mask = await segmentObjectFromSketch(frame.imageData, sketch);
+      const mask = await segmentObjectFromSketch(frame.imageData, sketch, corrections);
       if (request !== aiRequestId || frames[inFrame] !== frame) return;
       learnedMask = mask;
       trace();
@@ -309,10 +322,13 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     canvas.setPointerCapture(event.pointerId);
     const p = pos(event);
     if (tool === 'sketch') {
-      sketch = [p]; contour = []; learnedMask = null; aiRequestId++;
+      sketch = [p]; contour = []; learnedMask = null; aiRequestId++; corrections = [];
       pointer = { kind: 'sketch' }; render();
     } else if (tool === 'add') {
       pointer = { kind: 'add', start: p, last: p };
+    } else if (tool === 'include' || tool === 'exclude') {
+      corrections.push({ point: p, positive: tool === 'include' });
+      learnedMask = null; aiRequestId++; updateButtons(); render();
     } else {
       let hit = -1, best = 16;
       for (let i = 0; i < targets.length; i++) {
