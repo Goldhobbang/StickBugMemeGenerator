@@ -16,7 +16,25 @@ export interface DecodedGif {
 export async function decodeGif(url: string): Promise<DecodedGif> {
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Reference GIF fetch failed: ${response.status}`);
-  const parsed = parseGIF(await response.arrayBuffer());
+  return decodeGifBuffer(await response.arrayBuffer());
+}
+
+/** Decode a user-supplied GIF locally, without uploading it anywhere. */
+export async function decodeGifFile(file: File): Promise<DecodedGif> {
+  if (file.size > 20 * 1024 * 1024)
+    throw new Error('Custom GIF must be 20 MB or smaller.');
+  if (file.type !== 'image/gif' && !file.name.toLowerCase().endsWith('.gif'))
+    throw new Error('Select a .gif file.');
+  return decodeGifBuffer(await file.arrayBuffer());
+}
+
+function decodeGifBuffer(bytes: ArrayBuffer): DecodedGif {
+  const parsed = parseGIF(bytes);
+  const frameCount = parsed.frames.length;
+  if (frameCount === 0) throw new Error('GIF has no frames.');
+  const pixels = parsed.lsd.width * parsed.lsd.height;
+  if (pixels > 1024 * 1024 || pixels * frameCount * 4 > 180 * 1024 * 1024)
+    throw new Error('GIF is too large to decode safely in this browser. Use a smaller GIF (up to 180 MB of decoded frames).');
   const source = decompressFrames(parsed, true);
   if (!source.length) throw new Error('No frames decoded from reference GIF.');
 
