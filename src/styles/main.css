@@ -43,6 +43,41 @@ header.app-header p { margin: 4px 0 0; color: var(--muted); }
 
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; align-items: center; }
 
+.variation-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  margin-bottom: 14px;
+  padding: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.variation-picker label {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+.variation-picker select {
+  flex: 1;
+  min-width: 125px;
+  padding: 8px 10px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--accent-dim);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.variation-picker p {
+  flex: 0 0 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+
 button, select, input[type='file'] { font: inherit; }
 button {
   background: var(--panel-2);
