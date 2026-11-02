@@ -13,6 +13,8 @@ export interface RenderProject {
   gifHeight: number;
   memeFrames: DecodedFrame[];
   memeStartIndex: number;
+  /** Exclusive source frame index: clip ending is frame-accurate. */
+  memeEndIndex: number;
   memeDuration: number;
 }
 
@@ -117,7 +119,7 @@ export function renderFrame(
     const mt = memeTimeAt(t, proj);
     let acc = 0;
     let frame = proj.memeFrames[proj.memeStartIndex] ?? proj.memeFrames[0];
-    for (let i = proj.memeStartIndex; i < proj.memeFrames.length; i++) {
+    for (let i = proj.memeStartIndex; i < proj.memeEndIndex; i++) {
       const d = proj.memeFrames[i].delaySec;
       if (mt < acc + d) {
         frame = proj.memeFrames[i];
