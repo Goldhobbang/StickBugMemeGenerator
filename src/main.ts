@@ -857,15 +857,30 @@ function collectExportFrames(): {
   c.height = H;
   const scaledProj: RenderProject = { ...proj };
   const fps = state.settings.outputFps;
-  const step = 1 / fps;
   const tl = computeTimeline(proj.userSegments.length, state.settings, proj.memeDuration);
   const out: { data: Uint8ClampedArray; width: number; height: number; delayMs: number }[] = [];
+  const ctx = c.getContext('2d')!;
 
-  // Phases A–E at fixed fps.
-  for (let t = 0; t < tl.phaseEEnd; t += step) {
-    renderFrame(t, c, scaledProj);
-    const ctx = c.getContext('2d')!;
-    out.push({ data: ctx.getImageData(0, 0, W, H).data, width: W, height: H, delayMs: (step * 1000) });
+  // GIF stores delays in 10ms units. Generate the introduction on a
+  // centisecond timeline so rounding a 30fps interval to 30ms does not
+  // shorten the animation by 10%. A 30fps schedule becomes 30/40/30ms.
+  const introEndCs = Math.round(tl.phaseEEnd * 100);
+  let cursorCs = 0;
+  let introFrame = 0;
+  while (cursorCs < introEndCs) {
+    const nextCs = Math.min(
+      introEndCs,
+      Math.max(cursorCs + 1, Math.round(((introFrame + 1) * 100) / fps)),
+    );
+    renderFrame(cursorCs / 100, c, scaledProj);
+    out.push({
+      data: ctx.getImageData(0, 0, W, H).data,
+      width: W,
+      height: H,
+      delayMs: (nextCs - cursorCs) * 10,
+    });
+    cursorCs = nextCs;
+    introFrame++;
   }
   // Phase F: original frames verbatim, scaled up. No resampling of
   // timing: each source frame keeps its own delay. At 1x, pixel data is
@@ -876,7 +891,6 @@ function collectExportFrames(): {
     blit.width = f.imageData.width;
     blit.height = f.imageData.height;
     blit.getContext('2d')!.putImageData(f.imageData, 0, 0);
-    const ctx = c.getContext('2d')!;
     ctx.imageSmoothingEnabled = false;
     ctx.clearRect(0, 0, W, H);
     ctx.drawImage(blit, 0, 0, W, H);
@@ -884,7 +898,8 @@ function collectExportFrames(): {
       data: ctx.getImageData(0, 0, W, H).data,
       width: W,
       height: H,
-      delayMs: Math.max(20, f.delaySec * 1000),
+      // Copy each source frame ONCE, keeping its native centisecond delay.
+      delayMs: f.delayCs * 10,
     });
   }
   return { frames: out, width: W, height: H };
@@ -968,7 +983,7 @@ function encodeWithWorkerOrFallback(
           const index = applyPalette(f.data, palette, 'rgba4444');
           gif.writeFrame(index, width, height, {
             palette,
-            delay: Math.max(20, Math.round(f.delayMs / 10) * 10),
+            delay: Math.max(10, Math.round(f.delayMs / 10) * 10),
           });
           ($('progress-bar') as HTMLElement).style.width = `${((i + 1) / frames.length) * 100}%`;
           if (i % 10 === 0) await new Promise((r) => setTimeout(r, 0));
@@ -1095,7 +1110,7 @@ async function init(): Promise<void> {
     drawEditor();
     updatePreviewUI();
     const v = validate();
-    setStatus(v ?? 'Reference loaded. Upload an image.', v ? 'info' : 'ok');
+    setStatus(v ?? `Reference loaded: ${decoded.frames.length} frames, ${decoded.totalSec.toFixed(1)}s.`, v ? 'info' : 'ok');
     updateGenerateButton();
   } catch (e) {
     // Retry with plain relative + absolute fallbacks.
@@ -1109,7 +1124,7 @@ async function init(): Promise<void> {
         fitEditorCanvas();
         drawEditor();
         updatePreviewUI();
-        setStatus('Reference loaded. Upload an image.', 'ok');
+        setStatus(`Reference loaded: ${decoded.frames.length} frames, ${decoded.totalSec.toFixed(1)}s. Upload an image.`, 'ok');
         updateGenerateButton();
         return;
       } catch {
