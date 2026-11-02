@@ -878,6 +878,12 @@ function syncTimingInputs(): void {
 }
 
 /** Editing any handle changes its phase's duration, and no other durations. */
+function syncCustomClipControls(): void {
+  if (state.variation === 'custom' && state.decoded) {
+    customPanel?.setSource(state.decoded.frames, state.memeStartFrame, state.memeEndFrameExclusive);
+  }
+}
+
 function setTimelinePhaseDuration(id: PhaseId, seconds: number): void {
   if (state.exporting) return;
   const clamped = Math.min(30, Math.max(0, Math.round(seconds * 100) / 100));
@@ -887,7 +893,7 @@ function setTimelinePhaseDuration(id: PhaseId, seconds: number): void {
     case 'after': state.settings.grayHold = clamped; break;
     case 'motion': state.settings.transformDuration = clamped; break;
     case 'final': state.settings.finalHold = clamped; break;
-    case 'meme': setMemePlaybackSeconds(seconds); break;
+    case 'meme': setMemePlaybackSeconds(seconds); syncCustomClipControls(); break;
   }
   state.playT = Math.min(state.playT, totalDuration());
   updateTimingSummary();
@@ -903,7 +909,7 @@ function updateTimingSummary(): void {
   const intro = computeTimeline(animated, state.settings, 0).phaseEEnd;
   const step = animated > 0 ? state.settings.revealTotalDuration / animated : 0;
   const meme = state.decoded ? selectedMemeDuration() : null;
-  summary.textContent = `${drawn} drawn · ${animated} animated (${animated - drawn} clones) · template ${N} · ${state.settings.revealTotalDuration.toFixed(2)}s reveal (${step.toFixed(2)}s / line) · Intro ${intro.toFixed(2)}s`
+  summary.textContent = `${drawn} drawn · ${animated} animated (${Math.max(0, animated - drawn)} clones) · template ${N} · ${state.settings.revealTotalDuration.toFixed(2)}s reveal (${step.toFixed(2)}s / line) · Intro ${intro.toFixed(2)}s`
     + (meme === null ? ' · Loading source GIF…' : ` · Original GIF ${meme.toFixed(2)}s / ${memeFullDuration().toFixed(2)}s · Total ${(intro + meme).toFixed(2)}s`);
   syncTimingInputs();
   timelineUI?.refresh();
@@ -949,10 +955,11 @@ function renderSettings(): void {
   num('set-gray', (v) => (state.settings.grayHold = Math.min(30, Math.max(0, v))));
   num('set-trans', (v) => (state.settings.transformDuration = Math.min(30, Math.max(0, v))));
   num('set-final', (v) => (state.settings.finalHold = Math.min(30, Math.max(0, v))));
-  num('set-meme', (v) => setMemePlaybackSeconds(v));
+  num('set-meme', (v) => { setMemePlaybackSeconds(v); syncCustomClipControls(); });
   $('set-meme').addEventListener('change', () => {
     const input = $('set-meme') as HTMLInputElement;
     setMemePlaybackSeconds(Number(input.value));
+    syncCustomClipControls();
     input.value = selectedMemeDuration().toFixed(2);
     updateTimingSummary();
     updatePreviewUI();
