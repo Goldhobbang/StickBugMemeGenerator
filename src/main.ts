@@ -8,6 +8,8 @@ import type {
 } from './core/types';
 import { DEFAULT_SETTINGS } from './core/types';
 import { decodeGif, decodeGifFile } from './core/gifDecoder';
+import { decodeVideoFile, VIDEO_SAMPLE_FPS } from './core/videoDecoder';
+import { preferredVideoFormat, recordProjectVideo } from './core/videoRecorder';
 import { mountCustomGifPanel, type CustomGifPanel } from './core/customGifPanel';
 import { computeTimeline, stageAtTime, STAGE_LABELS } from './core/timeline';
 import { distToSegmentPx, segmentLengthPx } from './core/interpolation';
@@ -20,6 +22,9 @@ import { mountTimelineEditor, type PhaseId, type PhaseSpec, type TimelineEditor 
 
 interface AppState {
   variation: VariationId;
+  customMediaKind: 'gif' | 'video';
+  outputFormat: 'gif' | 'video';
+  recordingAbort: AbortController | null;
   image: HTMLImageElement | null;
   imageURL: string | null;
   userSegments: UserSegment[];
@@ -43,6 +48,9 @@ interface AppState {
 
 const state: AppState = {
   variation: 'stickbug',
+  customMediaKind: 'gif',
+  outputFormat: 'gif',
+  recordingAbort: null,
   image: null,
   imageURL: null,
   userSegments: [],
@@ -76,7 +84,7 @@ const app = document.getElementById('app')!;
 app.innerHTML = `
 <header class="app-header">
   <h1>Stick <span class="bug">Bug</span> Meme Generator</h1>
-  <p>Turn your image into a Stick Bug or RickRoll meme.</p>
+  <p>Turn an image into a Stick Bug, RickRoll, or custom GIF/video meme.</p>
 </header>
 <div class="layout">
   <section class="panel" aria-label="Image editor">
@@ -124,13 +132,21 @@ app.innerHTML = `
       <span class="time-label" id="time">0.0 / 0.0s</span>
     </div>
     <div class="toolbar">
+      <label class="export-format-label" for="export-format">Output
+        <select id="export-format" aria-label="Output format">
+          <option value="gif">Animated GIF (.gif)</option>
+          <option value="video">Video (browser-supported MP4 / WebM)</option>
+        </select>
+      </label>
       <button id="btn-generate" class="primary" disabled>Generate GIF</button>
       <a id="btn-download" style="display:none"><button class="primary">Download stick-bug-custom.gif</button></a>
       <button id="btn-cancel" class="danger" style="display:none">Cancel</button>
     </div>
     <div class="progress" id="progress"><div id="progress-bar"></div></div>
     <div class="status info" id="status">Loading reference GIF…</div>
+    <p id="export-format-hint" class="export-format-hint">GIF: silent animation. Video: silent MP4 or WebM using your browser's encoder.</p>
     <img id="result" class="result-img" alt="Generated GIF" />
+    <video id="video-result" class="result-video" controls playsinline preload="metadata" aria-label="Generated video preview"></video>
     <details class="settings" open>
       <summary>Animation timing &amp; settings</summary>
       <div id="timing-summary" class="timing-summary" aria-live="polite"></div>
@@ -148,11 +164,52 @@ const statusEl = $('status');
 const segCountEl = $('seg-count');
 let timelineUI: TimelineEditor | null = null;
 let customPanel: CustomGifPanel | null = null;
+let uploadAbort: AbortController | null = null;
 
 function setStatus(msg: string, kind: 'info' | 'error' | 'ok' = 'info'): void {
   statusEl.textContent = msg;
   statusEl.className = `status ${kind}`;
 }
+
+function clearExportResult(): void {
+  if (state.exportedURL) URL.revokeObjectURL(state.exportedURL);
+  state.exportedURL = null;
+  const image = $('result') as HTMLImageElement;
+  image.removeAttribute('src');
+  image.classList.remove('show');
+  const video = $('video-result') as HTMLVideoElement;
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
+  video.classList.remove('show');
+  const download = $('btn-download') as HTMLAnchorElement;
+  download.removeAttribute('href');
+  download.style.display = 'none';
+}
+
+function updateOutputFormatUI(): void {
+  const preferred = preferredVideoFormat();
+  const selector = $('export-format') as HTMLSelectElement;
+  const videoOption = selector.querySelector('option[value="video"]')!;
+  (videoOption as HTMLOptionElement).disabled = !preferred;
+  videoOption.textContent = preferred ? 'Video (.' + preferred.extension + ')' : 'Video (unsupported browser)';
+  if (!preferred && state.outputFormat === 'video') state.outputFormat = 'gif';
+  selector.value = state.outputFormat;
+  selector.disabled = state.exporting;
+  $('btn-generate').textContent = state.outputFormat === 'gif' ? 'Generate GIF' : 'Generate video';
+  $('export-format-hint').textContent = state.outputFormat === 'gif'
+    ? 'GIF: animated image without sound, using original source-frame timing.'
+    : 'Video: silent ' + (preferred?.label ?? 'MP4/WebM') +
+      ' captured in real time. Output container depends on browser support.';
+  updateGenerateButton();
+}
+
+$('export-format').addEventListener('change', (event) => {
+  if (state.exporting) return;
+  state.outputFormat = (event.target as HTMLSelectElement).value === 'video' ? 'video' : 'gif';
+  clearExportResult();
+  updateOutputFormatUI();
+});
 
 // ---------------------------------------------------------------- project for renderer
 
@@ -910,7 +967,7 @@ function updateTimingSummary(): void {
   const step = animated > 0 ? state.settings.revealTotalDuration / animated : 0;
   const meme = state.decoded ? selectedMemeDuration() : null;
   summary.textContent = `${drawn} drawn · ${animated} animated (${Math.max(0, animated - drawn)} clones) · template ${N} · ${state.settings.revealTotalDuration.toFixed(2)}s reveal (${step.toFixed(2)}s / line) · Intro ${intro.toFixed(2)}s`
-    + (meme === null ? ' · Loading source GIF…' : ` · Original GIF ${meme.toFixed(2)}s / ${memeFullDuration().toFixed(2)}s · Total ${(intro + meme).toFixed(2)}s`);
+    + (meme === null ? ' · Loading source media…' : ` · Source clip ${meme.toFixed(2)}s / ${memeFullDuration().toFixed(2)}s · Total ${(intro + meme).toFixed(2)}s`);
   syncTimingInputs();
   timelineUI?.refresh();
 }
@@ -919,13 +976,13 @@ function renderSettings(): void {
   const grid = $('settings-grid');
   const s = state.settings;
   grid.innerHTML = `
-    <div class="settings-section-title">GIF animation timing · seconds</div>
+    <div class="settings-section-title">Animation timing · seconds</div>
     <label>Total line reveal time (s)<input type="number" id="set-reveal" min="0" max="30" step="0.05" value="${s.revealTotalDuration}"></label>
     <label>Wait before background change (s)<input type="number" id="set-hold" min="0" max="30" step="0.1" value="${s.holdAfterReveal}"></label>
     <label>Wait after background change (s)<input type="number" id="set-gray" min="0" max="30" step="0.1" value="${s.grayHold}"></label>
     <label>Transformation motion (s)<input type="number" id="set-trans" min="0" max="30" step="0.1" value="${s.transformDuration}"></label>
     <label>Wait before original GIF (s)<input type="number" id="set-final" min="0" max="30" step="0.1" value="${s.finalHold}"></label>
-    <label>Original GIF playback length (s)<input type="number" id="set-meme" min="0.01" step="0.05" value="${selectedMemeDuration().toFixed(2)}">
+    <label>Source clip playback length (s)<input type="number" id="set-meme" min="0.01" step="0.05" value="${selectedMemeDuration().toFixed(2)}">
       <small class="meme-end-detail" id="meme-end-label">Loading source frames…</small>
     </label>
     <div class="settings-section-title">Appearance &amp; export</div>
@@ -1370,9 +1427,12 @@ async function selectVariation(id: VariationId): Promise<void> {
   const preset = VARIATIONS[id];
   if (!preset) return;
   const token = ++variationLoadToken;
+  uploadAbort?.abort();
+  uploadAbort = null;
   $('custom-panel').hidden = id !== 'custom';
   if (id === 'custom') customPanel?.reset();
   state.variation = id;
+  state.customMediaKind = 'gif';
   state.memeStartFrame = preset.memeStartFrame;
   state.decoded = null;
   state.memeEndFrameExclusive = 0;
@@ -1397,12 +1457,7 @@ async function selectVariation(id: VariationId): Promise<void> {
   calibTargets = TARGETS.map((target) => structuredClone(target));
   calibSelected = null;
 
-  if (state.exportedURL) URL.revokeObjectURL(state.exportedURL);
-  state.exportedURL = null;
-  const result = $('result') as HTMLImageElement;
-  result.removeAttribute('src');
-  result.classList.remove('show');
-  ($('btn-download') as HTMLAnchorElement).style.display = 'none';
+  clearExportResult();
   ($('variation-select') as HTMLSelectElement).value = id;
   $('variation-description').textContent = preset.description;
   renderSettings();
