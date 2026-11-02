@@ -42,6 +42,67 @@ export function coveredTargetCount(segments: UserSegment[], targets: TargetSegme
   ).size;
 }
 
+/**
+ * Turn the editable user strokes into the actual animated strokes.
+ *
+ * User strokes remain untouched; each missing template line receives a
+ * virtual stroke copied from the exact same source endpoints. Distribute
+ * copies evenly among all drawn strokes, instead of cloning the last one.
+ * This also repairs uncovered targets after manual mappings: any positive
+ * number of user strokes can complete the entire target outline.
+ *
+ * Virtual strokes only exist in preview/export, not in the editor or its
+ * undo history. Their stable IDs are unique for each missing target.
+ */
+export function buildEffectiveSegments(
+  userSegments: UserSegment[],
+  targets: TargetSegment[],
+): UserSegment[] {
+  if (userSegments.length === 0 || targets.length === 0) return [];
+
+  const originals = [...userSegments]
+    .sort((a, b) => a.order - b.order)
+    .map((segment, i): UserSegment => ({
+      ...segment,
+      order: i,
+      start: { ...segment.start },
+      end: { ...segment.end },
+    }));
+
+  // Work on copies; do not change the user's manual target mappings.
+  autoAssignTargets(originals, targets);
+
+  const usedIds = new Set(originals.map((segment) => segment.targetSegmentId));
+  const missingTargets = targets
+    .filter((target) => !usedIds.has(target.id))
+    .sort((a, b) => a.order - b.order);
+
+  const result = [...originals];
+  for (let i = 0; i < missingTargets.length; i++) {
+    // A round-robin style balanced allocation of clones to source lines.
+    // For M originals, every original supplies either floor(K/M) or
+    // ceil(K/M) clones, regardless of where the missing targets lie.
+    const source = originals[i % originals.length];
+    result.push({
+      ...source,
+      id: `clone:${source.id}:${missingTargets[i].id}`,
+      start: { ...source.start },
+      end: { ...source.end },
+      order: result.length,
+      targetSegmentId: missingTargets[i].id,
+      mappingMode: 'auto',
+    });
+  }
+  return result;
+}
+
+export function effectiveSegmentCount(
+  userSegments: UserSegment[],
+  targets: TargetSegment[],
+): number {
+  return buildEffectiveSegments(userSegments, targets).length;
+}
+
 function lerpPoint(a: Point, b: Point, t: number): Point {
   return {
     x: a.x + (b.x - a.x) * t,
