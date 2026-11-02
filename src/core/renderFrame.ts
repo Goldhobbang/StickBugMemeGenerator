@@ -22,15 +22,18 @@ export function currentSegmentsAt(
   const s = proj.settings;
   const segs = [...proj.userSegments].sort((a, b) => a.order - b.order);
   const n = segs.length;
-  const revealDuration = n * s.revealInterval;
-  const phaseBEnd = revealDuration + s.holdAfterReveal;
-  const phaseCEnd = phaseBEnd + s.grayHold;
-  const phaseDEnd = phaseCEnd + s.transformDuration;
+  const timeline = computeTimeline(n, s, proj.memeDuration);
+  const { revealDuration, phaseCEnd, phaseDEnd } = timeline;
 
   // Count revealed during phase A; all visible afterwards (until F hides them).
   let visibleCount = n;
-  if (t < 0) visibleCount = 0;
-  else if (t < revealDuration) visibleCount = Math.floor(t / s.revealInterval);
+  if (t < 0 || n === 0) visibleCount = 0;
+  else if (revealDuration > 0 && t < revealDuration) {
+    // Reveal one complete line at each equally spaced point of the total
+    // reveal period. The first line appears immediately, the last before
+    // the hold phase, regardless of how many lines the template requires.
+    visibleCount = Math.min(n, Math.floor((t / revealDuration) * n) + 1);
+  }
 
   let easedT = 0;
   if (t >= phaseDEnd) easedT = 1;
@@ -59,9 +62,8 @@ export function currentSegmentsAt(
 }
 
 export function isGrayPhase(t: number, proj: RenderProject): boolean {
-  const s = proj.settings;
-  const revealDuration = proj.userSegments.length * s.revealInterval;
-  return t >= revealDuration + s.holdAfterReveal;
+  const timeline = computeTimeline(proj.userSegments.length, proj.settings, proj.memeDuration);
+  return t >= timeline.phaseBEnd;
 }
 
 export function memeTimeAt(t: number, proj: RenderProject): number {
