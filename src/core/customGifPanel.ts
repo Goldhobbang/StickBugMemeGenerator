@@ -71,6 +71,8 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
   let targets: TargetSegment[] = [];
   let learnedMask: ModelMask | null = null;
   let corrections: SegmentationCorrection[] = [];
+  let cachedOverlayMask: ModelMask | null = null;
+  let cachedOverlay: HTMLCanvasElement | null = null;
   let aiRequestId = 0;
   let aiBusy = false;
   let tool: Tool = 'sketch';
@@ -112,21 +114,24 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     }
     const w = canvas.width, h = canvas.height;
     if (learnedMask && learnedMask.width > 0 && learnedMask.height > 0) {
-      const overlay = document.createElement('canvas');
-      overlay.width = learnedMask.width; overlay.height = learnedMask.height;
-      const overlayContext = overlay.getContext('2d')!;
-      const pixels = overlayContext.createImageData(overlay.width, overlay.height);
-      for (let i = 0; i < learnedMask.values.length; i++) {
-        const confidence = learnedMask.values[i];
-        if (confidence < .5) continue;
-        const offset = i * 4;
-        pixels.data[offset] = 34;
-        pixels.data[offset + 1] = 211;
-        pixels.data[offset + 2] = 238;
-        pixels.data[offset + 3] = 55;
+      if (cachedOverlayMask !== learnedMask || !cachedOverlay) {
+        const overlay = document.createElement('canvas');
+        overlay.width = learnedMask.width; overlay.height = learnedMask.height;
+        const overlayContext = overlay.getContext('2d')!;
+        const pixels = overlayContext.createImageData(overlay.width, overlay.height);
+        for (let i = 0; i < learnedMask.values.length; i++) {
+          if (learnedMask.values[i] < .5) continue;
+          const offset = i * 4;
+          pixels.data[offset] = 34;
+          pixels.data[offset + 1] = 211;
+          pixels.data[offset + 2] = 238;
+          pixels.data[offset + 3] = 55;
+        }
+        overlayContext.putImageData(pixels, 0, 0);
+        cachedOverlayMask = learnedMask;
+        cachedOverlay = overlay;
       }
-      overlayContext.putImageData(pixels, 0, 0);
-      ctx.drawImage(overlay, 0, 0, w, h);
+      ctx.drawImage(cachedOverlay, 0, 0, w, h);
     }
     if (sketch.length) {
       ctx.beginPath();
