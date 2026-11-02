@@ -94,7 +94,7 @@ app.innerHTML = `
       <select id="variation-select" aria-label="Select final meme variation">
         <option value="stickbug">Stick Bug</option>
         <option value="rickroll">RickRoll</option>
-        <option value="custom">Custom GIF · Auto Trace</option>
+        <option value="custom">Custom GIF / Video · Auto Trace</option>
       </select>
       <p id="variation-description"></p>
     </div>
