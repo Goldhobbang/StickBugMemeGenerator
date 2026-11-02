@@ -11,7 +11,7 @@ import { decodeGif, memeDurationFrom } from './core/gifDecoder';
 import { computeTimeline, stageAtTime, STAGE_LABELS } from './core/timeline';
 import { distToSegmentPx, segmentLengthPx } from './core/interpolation';
 import { renderFrame, type RenderProject } from './core/renderFrame';
-import { autoAssignTargets, coveredTargetCount } from './core/segmentMapping';
+import { autoAssignTargets, buildEffectiveSegments, coveredTargetCount, effectiveSegmentCount } from './core/segmentMapping';
 import { VARIATIONS, type VariationId } from './core/variations';
 
 // ---------------------------------------------------------------- state
@@ -93,7 +93,9 @@ app.innerHTML = `
       <button id="btn-redo" disabled>Redo</button>
       <button id="btn-del" class="danger" disabled>Delete</button>
       <button id="btn-clear" class="danger">Clear</button>
-      <span class="seg-count short" id="seg-count">Segments: 0 · Minimum ${N}</span>
+      <span class="seg-count short" id="seg-count">Drawn: 0</span>
+      <span class="seg-count template-count" id="seg-template">Template: ${N}</span>
+      <span class="seg-count short" id="seg-animated">Animated: 0</span>
       <button class="small" id="btn-auto-map" title="Reset manual mappings and distribute strokes automatically">Auto-map all</button>
     </div>
     <div class="dropzone" id="dropzone">Drag &amp; drop PNG / JPEG / WebP here, or click Upload</div>
@@ -151,7 +153,7 @@ function buildProject(): RenderProject | null {
   }
   return {
     image: state.image,
-    userSegments: [...state.userSegments].sort((a, b) => a.order - b.order),
+    userSegments: buildEffectiveSegments(state.userSegments, TARGETS),
     template: TARGETS,
     targetById,
     settings: state.settings,
@@ -175,7 +177,7 @@ function totalDuration(): number {
         state.memeStartFrame,
       )
     : 0;
-  return computeTimeline(state.userSegments.length, state.settings, memeDur).total;
+  return computeTimeline(effectiveSegmentCount(state.userSegments, TARGETS), state.settings, memeDur).total;
 }
 
 // ---------------------------------------------------------------- editor canvas
@@ -620,15 +622,19 @@ function afterSegmentsChanged(clearErr = true): void {
   updatePreviewUI();
   if (clearErr && state.refError === null) {
     const issue = validate();
-    setStatus(issue ?? 'Ready. Extra strokes will be fitted into the final outline.', issue ? 'error' : 'ok');
+    setStatus(issue ?? 'Ready. Missing strokes are cloned evenly; extra strokes fit the final outline.', issue ? 'error' : 'ok');
   }
 }
 
 function updateCounts(): void {
-  const count = state.userSegments.length;
-  const covered = coveredTargetCount(state.userSegments, TARGETS);
-  segCountEl.textContent = `Segments: ${count} · Minimum ${N} · Targets ${covered}/${N}`;
-  segCountEl.className = `seg-count ${count >= N && covered === N ? 'ok' : 'short'}`;
+  const drawn = state.userSegments.length;
+  const animated = effectiveSegmentCount(state.userSegments, TARGETS);
+  const clones = animated - drawn;
+  segCountEl.textContent = `Drawn: ${drawn}`;
+  segCountEl.className = `seg-count ${drawn > 0 ? 'ok' : 'short'}`;
+  $('seg-template').textContent = `Template: ${N}`;
+  $('seg-animated').textContent = `Animated: ${animated}${clones ? ` (+${clones} copies)` : ''}`;
+  $('seg-animated').className = `seg-count ${drawn > 0 ? 'ok' : 'short'}`;
   updateGenerateButton();
 }
 
@@ -638,15 +644,16 @@ function validate(): string | null {
   if (state.memeStartFrame < 0 || state.memeStartFrame >= state.decoded.frames.length)
     return 'Invalid meme start frame for the selected variation.';
   if (!state.image) return 'Upload an image to begin.';
-  if (state.userSegments.length < N)
-    return `Draw at least ${N} segments (now ${state.userSegments.length}). Extra segments are allowed.`;
-  if (coveredTargetCount(state.userSegments, TARGETS) !== N)
-    return 'Some outline targets are uncovered. Use Auto-map all, or adjust pinned targets.';
+  if (state.userSegments.length === 0)
+    return 'Draw at least one line. Missing template lines will be cloned automatically.';
+  const animatedSegments = buildEffectiveSegments(state.userSegments, TARGETS);
+  if (coveredTargetCount(animatedSegments, TARGETS) !== N)
+    return 'Could not cover the entire target outline. Try Auto-map all.';
   const W = state.decoded.width;
   const H = state.decoded.height;
   // The existing exporter buffers full RGBA frames. Prevent predictable
   // out-of-memory failures when combining long footage with 2×/4× output.
-  const introSec = computeTimeline(state.userSegments.length, state.settings, 0).phaseEEnd;
+  const introSec = computeTimeline(animatedSegments.length, state.settings, 0).phaseEEnd;
   const frameEstimate = Math.ceil(introSec * state.settings.outputFps)
     + (state.decoded.frames.length - state.memeStartFrame);
   const scale = state.settings.exportScale;
@@ -766,12 +773,13 @@ function updateTimingSummary(): void {
   const summary = document.getElementById('timing-summary');
   if (!summary) return;
   const drawn = state.userSegments.length;
-  const intro = computeTimeline(drawn, state.settings, 0).phaseEEnd;
-  const step = drawn > 0 ? state.settings.revealTotalDuration / drawn : 0;
+  const animated = effectiveSegmentCount(state.userSegments, TARGETS);
+  const intro = computeTimeline(animated, state.settings, 0).phaseEEnd;
+  const step = animated > 0 ? state.settings.revealTotalDuration / animated : 0;
   const meme = state.decoded
     ? memeDurationFrom({ ...state.decoded, totalSec: 0 }, state.memeStartFrame)
     : null;
-  summary.textContent = `${drawn} drawn lines (minimum ${N}) over ${state.settings.revealTotalDuration.toFixed(2)}s (${step.toFixed(2)}s / line) · Intro ${intro.toFixed(2)}s`
+  summary.textContent = `${drawn} drawn · ${animated} animated (${animated - drawn} clones) · template ${N} · ${state.settings.revealTotalDuration.toFixed(2)}s reveal (${step.toFixed(2)}s / line) · Intro ${intro.toFixed(2)}s`
     + (meme === null ? ' · Loading source GIF…' : ` · Original GIF ${meme.toFixed(2)}s · Total ${(intro + meme).toFixed(2)}s`);
 }
 
@@ -1284,7 +1292,7 @@ async function selectVariation(id: VariationId): Promise<void> {
     renderMapping();
     updatePreviewUI();
     updateTimingSummary();
-    setStatus(`${preset.name} loaded: ${decoded.frames.length} frames, ${decoded.totalSec.toFixed(2)}s. Draw at least ${N} lines; extra lines are auto-fitted.`, 'ok');
+    setStatus(`${preset.name} loaded: ${decoded.frames.length} frames, ${decoded.totalSec.toFixed(2)}s. Draw one or more lines; missing strokes are copied and extra strokes are fitted.`, 'ok');
     updateGenerateButton();
   } catch (e) {
     if (token !== variationLoadToken) return;
