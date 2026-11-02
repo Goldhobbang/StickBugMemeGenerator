@@ -951,92 +951,144 @@ function encodeWithWorkerOrFallback(
   width: number,
   height: number,
 ): Promise<Uint8Array> {
-  return new Promise((resolve, reject) => {
-    let worker: Worker | null = null;
+  // Keep the originals intact until the worker succeeds. Transferring every
+  // frame detaches the only buffers, making recovery impossible if the worker
+  // cannot load or is killed by the browser.
+  let cancelled = false;
+  let worker: Worker | null = null;
+  const cancelError = () => new Error('Export cancelled.');
+  const closeWorker = () => {
+    if (worker) {
+      worker.onmessage = null;
+      worker.onerror = null;
+      worker.onmessageerror = null;
+      worker.terminate();
+      worker = null;
+    }
+    state.worker = null;
+  };
+
+  return new Promise<Uint8Array>((resolve, reject) => {
+    let settled = false;
+    const finish = (bytes: Uint8Array) => {
+      if (settled) return;
+      settled = true;
+      closeWorker();
+      resolve(bytes);
+    };
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      closeWorker();
+      reject(error);
+    };
+
+    const cancelledByUser = () => {
+      cancelled = true;
+      fail(cancelError());
+    };
+    $('btn-cancel').onclick = cancelledByUser;
+
+    // Chunked fallback avoids reliance on Web Worker module loading.
+    // Also avoids a second complete copy of 2x/4x output frames in memory.
+    async function encodeOnMainThread(reason: string): Promise<void> {
+      if (settled || cancelled) return;
+      closeWorker();
+      setStatus(`Worker unavailable (${reason}). Encoding in browser…`, 'info');
+      try {
+        const { GIFEncoder, quantize, applyPalette } = await import('gifenc');
+        const gif = GIFEncoder();
+        for (let i = 0; i < frames.length; i++) {
+          if (cancelled || settled) throw cancelError();
+          const frame = frames[i];
+          const palette = quantize(frame.data, 256, { format: 'rgba4444' });
+          const indexed = applyPalette(frame.data, palette, 'rgba4444');
+          const delay = Math.max(10, Math.round(frame.delayMs / 10) * 10);
+          gif.writeFrame(indexed, width, height, { palette, delay });
+          $('progress-bar').style.width = `${((i + 1) / frames.length) * 100}%`;
+          if (i % 4 === 0) {
+            setStatus(`Encoding locally ${i + 1}/${frames.length}…`, 'info');
+            await new Promise<void>((r) => setTimeout(r, 0));
+          }
+        }
+        gif.finish();
+        const bytes = gif.bytes().slice();
+        if (bytes.length < 7 || bytes[0] !== 71 || bytes[1] !== 73 || bytes[2] !== 70) {
+          throw new Error('Encoder did not produce a valid GIF header.');
+        }
+        finish(bytes);
+      } catch (error) {
+        fail(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+
+    // Structured-cloning huge frame arrays can exhaust worker memory.
+    // Such exports run directly with the chunked encoder instead.
+    const totalBytes = frames.reduce((sum, f) => sum + f.data.byteLength, 0);
+    if (totalBytes > 64 * 1024 * 1024) {
+      void encodeOnMainThread('large export');
+      return;
+    }
+
     try {
       worker = new Worker(new URL('./workers/gifExport.worker.ts', import.meta.url), {
         type: 'module',
       });
-    } catch {
-      worker = null;
-    }
-    state.worker = worker;
-    const onCancel = () => {
-      try {
-        worker?.terminate();
-      } catch {
-        /* noop */
-      }
-      state.worker = null;
-      reject(new Error('Export cancelled.'));
-    };
-    $('btn-cancel').onclick = onCancel;
-
-    if (!worker) {
-      // Fallback: chunked main-thread encode to keep UI alive.
-      (async () => {
-        const { GIFEncoder, quantize, applyPalette } = await import('gifenc');
-        const gif = GIFEncoder();
-        for (let i = 0; i < frames.length; i++) {
-          const f = frames[i];
-          const palette = quantize(f.data, 256, { format: 'rgba4444' });
-          const index = applyPalette(f.data, palette, 'rgba4444');
-          gif.writeFrame(index, width, height, {
-            palette,
-            delay: Math.max(10, Math.round(f.delayMs / 10) * 10),
-          });
-          ($('progress-bar') as HTMLElement).style.width = `${((i + 1) / frames.length) * 100}%`;
-          if (i % 10 === 0) await new Promise((r) => setTimeout(r, 0));
-        }
-        gif.finish();
-        resolve(gif.bytes());
-      })().catch(reject);
+      state.worker = worker;
+    } catch (error) {
+      void encodeOnMainThread(error instanceof Error ? error.message : 'startup failure');
       return;
     }
 
     const w = worker;
     w.onmessage = (e: MessageEvent) => {
+      if (settled || cancelled) return;
       const msg = e.data as
         | { type: 'progress'; done: number; total: number }
         | { type: 'done'; buffer: ArrayBuffer }
         | { type: 'error'; message: string };
       if (msg.type === 'progress') {
-        ($('progress-bar') as HTMLElement).style.width = `${(msg.done / msg.total) * 100}%`;
+        $('progress-bar').style.width = `${(msg.done / msg.total) * 100}%`;
         setStatus(`Encoding ${msg.done}/${msg.total}…`, 'info');
       } else if (msg.type === 'done') {
-        state.worker = null;
-        w.terminate();
-        resolve(new Uint8Array(msg.buffer));
+        const bytes = new Uint8Array(msg.buffer);
+        if (bytes.length < 7 || bytes[0] !== 71 || bytes[1] !== 73 || bytes[2] !== 70) {
+          void encodeOnMainThread('invalid worker output');
+        } else {
+          finish(bytes);
+        }
+      } else if (msg.type === 'error') {
+        void encodeOnMainThread(msg.message || 'worker encoding error');
       } else {
-        state.worker = null;
-        w.terminate();
-        reject(new Error(msg.message));
+        void encodeOnMainThread('unrecognized worker response');
       }
     };
-    w.onerror = (ev) => {
-      state.worker = null;
-      try {
-        w.terminate();
-      } catch {
-        /* noop */
-      }
-      reject(new Error(`Worker error: ${ev.message || 'unknown'}`));
+    w.onerror = (event: ErrorEvent) => {
+      event.preventDefault();
+      void encodeOnMainThread(event.message || 'worker script/load error');
     };
-    const buffers = frames.map((f) => f.data.buffer as ArrayBuffer);
-    const delaysMs = frames.map((f) => f.delayMs);
-    w.postMessage({ type: 'export', frames: buffers, width, height, delaysMs }, buffers);
+    w.onmessageerror = () => {
+      void encodeOnMainThread('worker message deserialization error');
+    };
+
+    try {
+      // Do NOT transfer/detach buffers: worker may fail before sending any
+      // result, and the original pixels are needed for fallback encoding.
+      w.postMessage({
+        type: 'export',
+        frames: frames.map((f) => f.data.buffer),
+        width,
+        height,
+        delaysMs: frames.map((f) => f.delayMs),
+      });
+    } catch (error) {
+      void encodeOnMainThread(error instanceof Error ? error.message : 'message send error');
+    }
   });
 }
 
 $('btn-generate').addEventListener('click', runExport);
-$('btn-cancel').addEventListener('click', () => {
-  try {
-    state.worker?.terminate();
-  } catch {
-    /* noop */
-  }
-  state.worker = null;
-});
+
 
 // ---------------------------------------------------------------- keyboard
 
