@@ -11,12 +11,12 @@ import { decodeGif, memeDurationFrom } from './core/gifDecoder';
 import { computeTimeline, stageAtTime, STAGE_LABELS } from './core/timeline';
 import { distToSegmentPx, segmentLengthPx } from './core/interpolation';
 import { renderFrame, type RenderProject } from './core/renderFrame';
-import templateData from './assets/stickbug-template.json';
-import gifMeta from './assets/gif-meta.json';
+import { VARIATIONS, type VariationId } from './core/variations';
 
 // ---------------------------------------------------------------- state
 
 interface AppState {
+  variation: VariationId;
   image: HTMLImageElement | null;
   imageURL: string | null;
   userSegments: UserSegment[];
@@ -37,6 +37,7 @@ interface AppState {
 }
 
 const state: AppState = {
+  variation: 'stickbug',
   image: null,
   imageURL: null,
   userSegments: [],
@@ -45,7 +46,7 @@ const state: AppState = {
   tool: 'draw',
   settings: { ...DEFAULT_SETTINGS },
   decoded: null,
-  memeStartFrame: (gifMeta as { memeStartFrame: number }).memeStartFrame ?? 44,
+  memeStartFrame: VARIATIONS.stickbug.memeStartFrame,
   playing: false,
   playT: 0,
   lastTick: 0,
@@ -56,9 +57,8 @@ const state: AppState = {
   idCounter: 1,
 };
 
-const tpl = templateData as { segments: TargetSegment[]; memeStartFrame: number };
-const TARGETS: TargetSegment[] = [...tpl.segments].sort((a, b) => a.order - b.order);
-const N = TARGETS.length;
+const TARGETS: TargetSegment[] = [...VARIATIONS.stickbug.segments].sort((a, b) => a.order - b.order);
+let N = TARGETS.length;
 const targetById = new Map(TARGETS.map((t) => [t.id, t]));
 
 const CALIBRATE_MODE = new URLSearchParams(location.search).has('calibrate');
@@ -70,11 +70,19 @@ const app = document.getElementById('app')!;
 app.innerHTML = `
 <header class="app-header">
   <h1>Stick <span class="bug">Bug</span> Meme Generator</h1>
-  <p>Turn your image into a Stick Bug meme.</p>
+  <p>Turn your image into a Stick Bug or RickRoll meme.</p>
 </header>
 <div class="layout">
   <section class="panel" aria-label="Image editor">
     <h2>Image Editor</h2>
+    <div class="variation-picker">
+      <label for="variation-select">Final meme variation</label>
+      <select id="variation-select" aria-label="Select final meme variation">
+        <option value="stickbug">Stick Bug</option>
+        <option value="rickroll">RickRoll</option>
+      </select>
+      <p id="variation-description"></p>
+    </div>
     <div class="toolbar">
       <button id="btn-upload">Upload image</button>
       <input type="file" id="file-input" accept="image/png,image/jpeg,image/webp" hidden />
@@ -89,7 +97,7 @@ app.innerHTML = `
     <div class="dropzone" id="dropzone">Drag &amp; drop PNG / JPEG / WebP here, or click Upload</div>
     <div class="editor-wrap"><canvas id="editor" class="editor" width="440" height="248"></canvas></div>
     <div id="mapping" class="mapping-list" aria-label="Segment mapping"></div>
-    ${CALIBRATE_MODE ? '<div class="calib-hint"><b>Calibration mode</b> (?calibrate=1): reference frame F43 shown. Draw = add target segment. Select + drag = adjust. <button id="btn-calib-export" class="small">Copy template JSON</button> <button id="btn-calib-use" class="small">Use as template</button></div>' : ''}
+    ${CALIBRATE_MODE ? '<div class="calib-hint"><b>Calibration mode</b> (?calibrate=1): final outline frame shown. Draw = add target segment. Select + drag = adjust. <button id="btn-calib-export" class="small">Copy template JSON</button> <button id="btn-calib-use" class="small">Use as template</button></div>' : ''}
   </section>
   <section class="panel" aria-label="Animation preview">
     <h2>Animation Preview</h2>
@@ -183,8 +191,9 @@ function canvasPos(e: PointerEvent): Point {
 }
 
 function fitEditorCanvas(): void {
-  const W = state.decoded?.width ?? 220;
-  const H = state.decoded?.height ?? 124;
+  const variation = VARIATIONS[state.variation];
+  const W = state.decoded?.width ?? variation.referenceWidth;
+  const H = state.decoded?.height ?? variation.referenceHeight;
   editorCanvas.width = W * 2;
   editorCanvas.height = H * 2;
   previewCanvas.width = W * 2;
@@ -198,8 +207,8 @@ function drawEditor(draft?: { a: Point; b: Point }): void {
   const s = state.settings;
 
   if (CALIBRATE_MODE && state.decoded) {
-    // Show composited reference frame F43 as annotation background.
-    const f = state.decoded.frames[43] ?? state.decoded.frames[0];
+    // Show the target frame immediately before the selected meme begins.
+    const f = state.decoded.frames[Math.max(0, state.memeStartFrame - 1)] ?? state.decoded.frames[0];
     const tmp = document.createElement('canvas');
     tmp.width = f.imageData.width;
     tmp.height = f.imageData.height;
@@ -621,11 +630,23 @@ function updateCounts(): void {
 function validate(): string | null {
   if (state.refError) return state.refError;
   if (!state.decoded) return 'Reference GIF still loading…';
+  if (state.memeStartFrame < 0 || state.memeStartFrame >= state.decoded.frames.length)
+    return 'Invalid meme start frame for the selected variation.';
   if (!state.image) return 'Upload an image to begin.';
   if (state.userSegments.length !== N)
     return `Draw exactly ${N} segments (now ${state.userSegments.length}).`;
   const W = state.decoded.width;
   const H = state.decoded.height;
+  // The existing exporter buffers full RGBA frames. Prevent predictable
+  // out-of-memory failures when combining long footage with 2×/4× output.
+  const introSec = computeTimeline(N, state.settings, 0).phaseEEnd;
+  const frameEstimate = Math.ceil(introSec * state.settings.outputFps)
+    + (state.decoded.frames.length - state.memeStartFrame);
+  const scale = state.settings.exportScale;
+  const rawByteEstimate = frameEstimate * state.decoded.width * scale
+    * state.decoded.height * scale * 4;
+  if (rawByteEstimate > 260 * 1024 * 1024)
+    return 'Export scale is too large for this clip. Choose 1× in Settings.';
   const seen = new Set<string>();
   for (const sg of state.userSegments) {
     if (segmentLengthPx(sg.start, sg.end, W, H) < 4) return 'One segment is too short.';
@@ -802,6 +823,9 @@ function renderSettings(): void {
   $('set-scale').addEventListener('change', (e) => {
     const v = Number((e.target as HTMLSelectElement).value);
     state.settings.exportScale = (v === 2 || v === 4 ? v : 1) as 1 | 2 | 4;
+    updateGenerateButton();
+    const issue = validate();
+    if (issue && issue.includes('Export scale')) setStatus(issue, 'error');
   });
   ($('set-scale') as HTMLSelectElement).value = String(s.exportScale);
   updateTimingSummary();
@@ -832,7 +856,9 @@ function updatePreviewUI(): void {
   if (proj) {
     renderFrame(Math.min(state.playT, Math.max(0, total - 0.001)), previewCanvas, proj);
     const tl = computeTimeline(proj.userSegments.length, state.settings, proj.memeDuration);
-    $('stage').textContent = `${STAGE_LABELS[stageAtTime(state.playT, tl)]} · ${state.playT.toFixed(1)}s`;
+    const stage = stageAtTime(state.playT, tl);
+    const stageLabel = stage === 'F' ? `F · ${VARIATIONS[state.variation].name}` : STAGE_LABELS[stage];
+    $('stage').textContent = `${stageLabel} · ${state.playT.toFixed(1)}s`;
   }
   $('time').textContent = `${state.playT.toFixed(1)} / ${total.toFixed(1)}s`;
   if (total > 0) seek.value = String(Math.round((state.playT / total) * 1000));
@@ -952,7 +978,8 @@ async function runExport(): Promise<void> {
     img.classList.add('show');
     const dl = $('btn-download') as HTMLAnchorElement;
     dl.href = state.exportedURL;
-    dl.download = 'stick-bug-custom.gif';
+    dl.download = VARIATIONS[state.variation].exportFilename;
+    (dl.querySelector('button') as HTMLButtonElement).textContent = `Download ${dl.download}`;
     dl.style.display = '';
     setStatus(`Done — ${frames.length} frames, ${(blob.size / 1024).toFixed(0)} KB.`, 'ok');
   } catch (e) {
@@ -1161,7 +1188,100 @@ $('btn-calib-use')?.addEventListener('click', () => {
   setStatus(`Using ${TARGETS.length} calibrated targets for this session.`, 'ok');
 });
 
-// ---------------------------------------------------------------- init
+// ---------------------------------------------------------------- variation loading and initialization
+
+// Reusing decoded frames avoids reloading/downloading a variation after
+// switching away from it. Every preset still has its own template and timing.
+const decodedCache = new Map<VariationId, Awaited<ReturnType<typeof decodeGif>>>();
+let variationLoadToken = 0;
+
+async function selectVariation(id: VariationId): Promise<void> {
+  const preset = VARIATIONS[id];
+  if (!preset) return;
+  const token = ++variationLoadToken;
+  state.variation = id;
+  state.memeStartFrame = preset.memeStartFrame;
+  state.decoded = null;
+  state.refError = null;
+  state.playing = false;
+  state.playT = 0;
+  ($('btn-play') as HTMLButtonElement).textContent = 'Play';
+  state.settings.backgroundColor = preset.backgroundColor;
+  state.settings.segmentColor = preset.segmentColor;
+  // The two target outlines have different stroke counts and positions.
+  // Keep the uploaded photo, but reset lines and mappings on preset change.
+  state.userSegments = [];
+  state.redoStack = [];
+  undoStack.length = 0;
+  state.selectedId = null;
+  drag = null;
+  draftPt = null;
+  TARGETS.splice(0, TARGETS.length, ...preset.segments.map((segment) => ({ ...segment })));
+  N = TARGETS.length;
+  targetById.clear();
+  for (const segment of TARGETS) targetById.set(segment.id, segment);
+  calibTargets = TARGETS.map((target) => structuredClone(target));
+  calibSelected = null;
+
+  if (state.exportedURL) URL.revokeObjectURL(state.exportedURL);
+  state.exportedURL = null;
+  const result = $('result') as HTMLImageElement;
+  result.removeAttribute('src');
+  result.classList.remove('show');
+  ($('btn-download') as HTMLAnchorElement).style.display = 'none';
+  ($('variation-select') as HTMLSelectElement).value = id;
+  $('variation-description').textContent = preset.description;
+  renderSettings();
+  fitEditorCanvas();
+  renderMapping();
+  refreshUndoRedo();
+  updateCounts();
+  drawEditor();
+  updatePreviewUI();
+  setStatus(`Loading ${preset.name} reference GIF…`, 'info');
+
+  try {
+    let decoded = decodedCache.get(id);
+    if (!decoded) {
+      let error: unknown = null;
+      const urls = [
+        `${import.meta.env.BASE_URL}${preset.gifFile}`,
+        `./${preset.gifFile}`,
+        preset.gifFile,
+      ];
+      for (const url of [...new Set(urls)]) {
+        try {
+          decoded = await decodeGif(url);
+          break;
+        } catch (e) {
+          error = e;
+        }
+      }
+      if (!decoded) throw error ?? new Error('Could not load the reference GIF.');
+      if (decoded.frames.length <= preset.memeStartFrame)
+        throw new Error(`Reference GIF has only ${decoded.frames.length} frames (needs frame ${preset.memeStartFrame}).`);
+      decodedCache.set(id, decoded);
+    }
+    if (token !== variationLoadToken) return;
+    state.decoded = decoded;
+    fitEditorCanvas();
+    drawEditor();
+    renderMapping();
+    updatePreviewUI();
+    updateTimingSummary();
+    setStatus(`${preset.name} loaded: ${decoded.frames.length} frames, ${decoded.totalSec.toFixed(2)}s. ${N} lines required.`, 'ok');
+    updateGenerateButton();
+  } catch (e) {
+    if (token !== variationLoadToken) return;
+    state.refError = `${preset.name} reference failed to load: ${e instanceof Error ? e.message : String(e)}`;
+    setStatus(state.refError, 'error');
+    updateGenerateButton();
+  }
+}
+
+$('variation-select').addEventListener('change', (e) => {
+  void selectVariation((e.target as HTMLSelectElement).value as VariationId);
+});
 
 async function init(): Promise<void> {
   fitEditorCanvas();
@@ -1171,43 +1291,7 @@ async function init(): Promise<void> {
   updateCounts();
   drawEditor();
   requestAnimationFrame(previewTick);
-
-  try {
-    const decoded = await decodeGif(`${import.meta.env.BASE_URL}stick-bug.gif`);
-    // BASE_URL is './' for GitHub Pages relative paths.
-    state.decoded = decoded;
-    state.refError = null;
-    fitEditorCanvas();
-    drawEditor();
-    updatePreviewUI();
-    updateTimingSummary();
-    const v = validate();
-    setStatus(v ?? `Reference loaded: ${decoded.frames.length} frames, ${decoded.totalSec.toFixed(1)}s.`, v ? 'info' : 'ok');
-    updateGenerateButton();
-  } catch (e) {
-    // Retry with plain relative + absolute fallbacks.
-    const tried: string[] = [];
-    for (const url of ['stick-bug.gif', './stick-bug.gif', '/stick-bug.gif', 'src/assets/stick-bug.gif']) {
-      try {
-        tried.push(url);
-        const decoded = await decodeGif(url);
-        state.decoded = decoded;
-        state.refError = null;
-        fitEditorCanvas();
-        drawEditor();
-        updatePreviewUI();
-        updateTimingSummary();
-        setStatus(`Reference loaded: ${decoded.frames.length} frames, ${decoded.totalSec.toFixed(1)}s. Upload an image.`, 'ok');
-        updateGenerateButton();
-        return;
-      } catch {
-        /* try next */
-      }
-    }
-    state.refError = `Reference GIF failed to load (tried ${tried.join(', ')}): ${e instanceof Error ? e.message : String(e)}`;
-    setStatus(state.refError, 'error');
-    updateGenerateButton();
-  }
+  await selectVariation('stickbug');
 }
 
 void init();
