@@ -202,3 +202,190 @@ details.settings summary { cursor: pointer; color: var(--muted); font-size: 14px
 kbd { background: var(--panel-2); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 11px; }
 
 .calib-hint { font-size: 12px; color: var(--muted); background: #1c1526; border: 1px solid var(--accent-dim); border-radius: 8px; padding: 8px; margin-top: 8px; }
+
+
+/* Interactive multi-track GIF timeline */
+.timeline-panel {
+  margin: 12px 0 4px;
+}
+.timeline-editor {
+  position: relative;
+  padding: 12px;
+  background: #181826;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.tl-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  margin-bottom: 5px;
+}
+.tl-total, .tl-legend-time {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: #d3d3e7;
+}
+.tl-instruction {
+  margin: 0 0 10px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.tl-track {
+  display: flex;
+  position: relative;
+  width: 100%;
+  height: 40px;
+  border-radius: 7px;
+  background: #2a2a3a;
+  isolation: isolate;
+  overflow: visible;
+  user-select: none;
+  touch-action: pan-y;
+}
+.tl-phase {
+  flex: 0 1 0%;
+  position: relative;
+  min-width: 12px;
+  height: 100%;
+  background: var(--phase-color);
+  border-right: 1px solid rgba(0,0,0,.25);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: visible;
+  cursor: crosshair;
+}
+.tl-phase:first-of-type { border-radius: 7px 0 0 7px; }
+.tl-phase:nth-last-child(2) { border-radius: 0 7px 7px 0; }
+.tl-phase-label {
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 1px 3px rgba(0,0,0,.65);
+  pointer-events: none;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
+  max-width: calc(100% - 15px);
+}
+.tl-resize {
+  position: absolute;
+  right: -6px;
+  top: -3px;
+  width: 12px;
+  height: calc(100% + 6px);
+  padding: 0;
+  border: 1px solid rgba(255,255,255,.8);
+  border-radius: 5px;
+  background: rgba(19,18,33,.8);
+  box-shadow: 0 0 0 1px rgba(0,0,0,.22);
+  cursor: ew-resize;
+  touch-action: none;
+  z-index: 3;
+}
+.tl-resize:hover:not(:disabled), .tl-resize:focus-visible {
+  background: white;
+  border-color: white;
+  outline: 2px solid var(--accent);
+}
+.tl-resize:disabled {
+  opacity: .35;
+}
+.tl-playhead {
+  position: absolute;
+  z-index: 5;
+  top: -7px;
+  bottom: -7px;
+  width: 2px;
+  background: #fff;
+  box-shadow: 0 0 3px rgba(0,0,0,.85);
+  pointer-events: none;
+}
+.tl-playhead::before {
+  content: '';
+  position: absolute;
+  top: -2px;
+  left: -4px;
+  width: 10px;
+  height: 9px;
+  border-radius: 2px;
+  background: #fff;
+}
+.tl-legend {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 14px;
+  margin-top: 13px;
+}
+.tl-legend-item {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+  font-size: 11px;
+}
+.tl-legend-dot {
+  flex: 0 0 9px;
+  height: 9px;
+  border-radius: 3px;
+}
+.tl-legend-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--muted);
+}
+.tl-legend-time {
+  margin-left: auto;
+  font-weight: 600;
+}
+.tl-hover {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  width: 244px;
+  padding: 9px;
+  background: #0c0c13;
+  border: 1px solid #57506d;
+  border-radius: 9px;
+  box-shadow: 0 9px 35px rgba(0,0,0,.55);
+  pointer-events: none;
+}
+.tl-hover[hidden] { display: none; }
+.tl-hover-frame {
+  width: 100%;
+  height: auto;
+  display: block;
+  max-height: 240px;
+  object-fit: contain;
+  background: black;
+  border-radius: 5px;
+}
+.tl-hover-caption {
+  margin-top: 6px;
+  color: #e1dfef;
+  text-align: center;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.tl-dragging, .tl-dragging * {
+  cursor: ew-resize !important;
+  user-select: none;
+}
+.meme-end-detail {
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--muted);
+}
+@media (max-width: 520px) {
+  .timeline-editor { padding: 10px 8px; }
+  .tl-legend { grid-template-columns: 1fr 1fr; gap: 8px; }
+  .tl-legend-item { font-size: 10px; }
+  .tl-phase-label { font-size: 9px; }
+}
