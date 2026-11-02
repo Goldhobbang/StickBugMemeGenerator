@@ -748,7 +748,8 @@ function updateCounts(): void {
 
 function validate(): string | null {
   if (state.refError) return state.refError;
-  if (!state.decoded) return 'Reference GIF still loading…';
+  if (!state.decoded) return 'Source GIF/video still loading…';
+  if (state.outputFormat === 'video' && !preferredVideoFormat()) return 'Video recording is not supported by this browser. Choose GIF.';
   if (state.memeStartFrame < 0 || state.memeStartFrame >= state.decoded.frames.length)
     return 'Invalid meme start frame for the selected variation.';
   if (state.memeEndFrameExclusive <= state.memeStartFrame || state.memeEndFrameExclusive > state.decoded.frames.length)
@@ -771,8 +772,13 @@ function validate(): string | null {
   const scale = state.settings.exportScale;
   const rawByteEstimate = frameEstimate * state.decoded.width * scale
     * state.decoded.height * scale * 4;
-  if (rawByteEstimate > 260 * 1024 * 1024)
-    return 'Export scale is too large for this clip. Choose 1× in Settings.';
+  if (state.outputFormat === 'gif' && rawByteEstimate > 260 * 1024 * 1024)
+    return 'GIF export is too large for this clip. Choose 1× or Video in Settings.';
+  if (state.outputFormat === 'video') {
+    if (state.decoded.width * state.settings.exportScale * state.decoded.height * state.settings.exportScale > 1920 * 1080)
+      return 'Video export exceeds 1920×1080. Choose a smaller export scale.';
+    if (totalDuration() > 90) return 'Video export must be 90 seconds or less.';
+  }
   for (const sg of state.userSegments) {
     if (segmentLengthPx(sg.start, sg.end, W, H) < 4) return 'One segment is too short.';
     if (!targetById.has(sg.targetSegmentId)) return 'Unknown target mapping.';
@@ -935,9 +941,13 @@ function syncTimingInputs(): void {
 }
 
 /** Editing any handle changes its phase's duration, and no other durations. */
+function customMediaDescription(): string {
+  return state.customMediaKind === 'video' ? 'Video sampled at ' + VIDEO_SAMPLE_FPS + ' fps' : 'GIF';
+}
+
 function syncCustomClipControls(): void {
   if (state.variation === 'custom' && state.decoded) {
-    customPanel?.setSource(state.decoded.frames, state.memeStartFrame, state.memeEndFrameExclusive);
+    customPanel?.setSource(state.decoded.frames, state.memeStartFrame, state.memeEndFrameExclusive, customMediaDescription());
   }
 }
 
@@ -1090,7 +1100,7 @@ function updatePreviewUI(): void {
 
 $('btn-play').addEventListener('click', () => {
   if (!buildProject()) {
-    setStatus('Reference GIF not loaded yet.', 'error');
+    setStatus('Source GIF/video not loaded yet.', 'error');
     return;
   }
   const total = totalDuration();
@@ -1468,7 +1478,7 @@ async function selectVariation(id: VariationId): Promise<void> {
   drawEditor();
   updatePreviewUI();
   if (id === 'custom') {
-    setStatus('Upload a custom GIF, set IN/OUT frames, then sketch around its target object.', 'info');
+    setStatus('Upload a GIF or video, set IN/OUT frames, then sketch around its target object.', 'info');
     return;
   }
   setStatus(`Loading ${preset.name} reference GIF…`, 'info');
@@ -1551,27 +1561,40 @@ function updateCustomClip(start: number, endExclusive: number): void {
     // A target outline is bound to the chosen IN frame, never to a stale frame.
     applyCustomTargets([]);
   }
-  customPanel?.setSource(state.decoded.frames, nextStart, nextEnd);
+  customPanel?.setSource(state.decoded.frames, nextStart, nextEnd, customMediaDescription());
   updateTimingSummary();
   updatePreviewUI();
   updateGenerateButton();
   if (changedStart) setStatus('IN frame changed. Sketch this frame to generate a new target outline.', 'info');
 }
 
-async function uploadCustomGif(file: File): Promise<void> {
-  if (state.variation !== 'custom') return;
+async function uploadCustomMedia(file: File): Promise<void> {
+  if (state.variation !== 'custom' || state.exporting) return;
   const token = ++variationLoadToken;
+  uploadAbort?.abort();
+  const controller = new AbortController();
+  uploadAbort = controller;
+  const isVideo = file.type.startsWith('video/') || /\.(mp4|webm|mov|m4v|ogv)$/i.test(file.name);
   state.refError = null;
-  setStatus('Decoding custom GIF locally…', 'info');
+  setStatus(isVideo ? 'Sampling video frames locally…' : 'Decoding custom GIF locally…', 'info');
   try {
-    const decoded = await decodeGifFile(file);
+    const decoded = isVideo
+      ? await decodeVideoFile(file, {
+          signal: controller.signal,
+          progress: (fraction) => {
+            if (token === variationLoadToken && fraction > 0)
+              setStatus('Decoding video · ' + Math.round(fraction * 100) + '% · ' + VIDEO_SAMPLE_FPS + ' fps sampled', 'info');
+          },
+        })
+      : await decodeGifFile(file);
     if (token !== variationLoadToken || state.variation !== 'custom') return;
     state.decoded = decoded;
+    state.customMediaKind = isVideo ? 'video' : 'gif';
     state.memeStartFrame = 0;
     state.memeEndFrameExclusive = decoded.frames.length;
     state.playT = 0;
     applyCustomTargets([]);
-    customPanel?.setSource(decoded.frames, 0, decoded.frames.length);
+    customPanel?.setSource(decoded.frames, 0, decoded.frames.length, customMediaDescription());
     fitEditorCanvas();
     drawEditor();
     renderMapping();
@@ -1579,19 +1602,24 @@ async function uploadCustomGif(file: File): Promise<void> {
     updatePreviewUI();
     updateGenerateButton();
     setStatus('Loaded ' + file.name + ': ' + decoded.frames.length +
-      ' frames, ' + decoded.totalSec.toFixed(2) + 's. Sketch around your target on the IN frame.', 'ok');
+      ' sampled frames, ' + decoded.totalSec.toFixed(2) +
+      's. Sketch around your target on the IN frame.' +
+      (isVideo ? ' Source audio is not included in exports.' : ''), 'ok');
   } catch (error) {
-    if (token !== variationLoadToken) return;
+    if (token !== variationLoadToken || controller.signal.aborted) return;
     state.refError = error instanceof Error ? error.message : String(error);
-    setStatus('Custom GIF failed: ' + state.refError, 'error');
+    setStatus('Custom media failed: ' + state.refError, 'error');
     updateGenerateButton();
+  } finally {
+    if (uploadAbort === controller) uploadAbort = null;
   }
 }
 
 async function init(): Promise<void> {
   fitEditorCanvas();
+  updateOutputFormatUI();
   customPanel = mountCustomGifPanel($('custom-panel'), {
-    upload: (file) => { void uploadCustomGif(file); },
+    upload: (file) => { void uploadCustomMedia(file); },
     clip: updateCustomClip,
     generated: applyCustomTargets,
     edited: applyCustomTargets,
