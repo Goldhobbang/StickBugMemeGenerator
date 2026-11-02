@@ -812,6 +812,75 @@ $('btn-clear').addEventListener('click', () => {
 
 // ---------------------------------------------------------------- settings panel
 
+function timelinePhases(): PhaseSpec[] {
+  const settings = state.settings;
+  const memeLoaded = Boolean(state.decoded);
+  return [
+    { id: 'reveal', label: 'Line reveal', shortLabel: 'Reveal', color: '#7655d9',
+      duration: settings.revealTotalDuration, min: 0, max: 30 },
+    { id: 'before', label: 'Before background change', shortLabel: 'Before', color: '#346da9',
+      duration: settings.holdAfterReveal, min: 0, max: 30 },
+    { id: 'after', label: 'After background change', shortLabel: 'After', color: '#1e8589',
+      duration: settings.grayHold, min: 0, max: 30 },
+    { id: 'motion', label: 'Transformation motion', shortLabel: 'Move', color: '#b8772a',
+      duration: settings.transformDuration, min: 0, max: 30 },
+    { id: 'final', label: 'Before original footage', shortLabel: 'Hold', color: '#9651a2',
+      duration: settings.finalHold, min: 0, max: 30 },
+    { id: 'meme', label: 'Original GIF footage', shortLabel: 'Meme', color: '#338760',
+      duration: selectedMemeDuration(),
+      min: memeLoaded ? firstMemeFrameDuration() : 0,
+      max: memeLoaded ? memeFullDuration() : 0 },
+  ];
+}
+
+/** Keep inputs and timeline consistent without stealing focus while typing. */
+function syncTimingInputs(): void {
+  const inputMap = [
+    ['set-reveal', state.settings.revealTotalDuration],
+    ['set-hold', state.settings.holdAfterReveal],
+    ['set-gray', state.settings.grayHold],
+    ['set-trans', state.settings.transformDuration],
+    ['set-final', state.settings.finalHold],
+    ['set-meme', selectedMemeDuration()],
+  ] as const;
+  for (const [id, seconds] of inputMap) {
+    const input = document.getElementById(id) as HTMLInputElement | null;
+    if (input && document.activeElement !== input) input.value = seconds.toFixed(2);
+  }
+  const memeInput = document.getElementById('set-meme') as HTMLInputElement | null;
+  if (memeInput) {
+    memeInput.min = Math.max(0.01, firstMemeFrameDuration()).toFixed(2);
+    memeInput.max = Math.max(0.01, memeFullDuration()).toFixed(2);
+    memeInput.disabled = !state.decoded || state.exporting;
+  }
+  const detail = document.getElementById('meme-end-label');
+  if (detail) {
+    if (!state.decoded) detail.textContent = 'Loading source frames…';
+    else detail.textContent =
+      'Source ' + selectedMemeDuration().toFixed(2) + ' / ' + memeFullDuration().toFixed(2) +
+      's · frames ' + state.memeStartFrame + '–' + (state.memeEndFrameExclusive - 1) +
+      ' (' + (state.memeEndFrameExclusive - state.memeStartFrame) + ' frames)';
+  }
+}
+
+/** Editing any handle changes its phase's duration, and no other durations. */
+function setTimelinePhaseDuration(id: PhaseId, seconds: number): void {
+  if (state.exporting) return;
+  const clamped = Math.min(30, Math.max(0, Math.round(seconds * 100) / 100));
+  switch (id) {
+    case 'reveal': state.settings.revealTotalDuration = clamped; break;
+    case 'before': state.settings.holdAfterReveal = clamped; break;
+    case 'after': state.settings.grayHold = clamped; break;
+    case 'motion': state.settings.transformDuration = clamped; break;
+    case 'final': state.settings.finalHold = clamped; break;
+    case 'meme': setMemePlaybackSeconds(seconds); break;
+  }
+  state.playT = Math.min(state.playT, totalDuration());
+  updateTimingSummary();
+  updatePreviewUI();
+  updateGenerateButton();
+}
+
 function updateTimingSummary(): void {
   const summary = document.getElementById('timing-summary');
   if (!summary) return;
@@ -819,11 +888,11 @@ function updateTimingSummary(): void {
   const animated = effectiveSegmentCount(state.userSegments, TARGETS);
   const intro = computeTimeline(animated, state.settings, 0).phaseEEnd;
   const step = animated > 0 ? state.settings.revealTotalDuration / animated : 0;
-  const meme = state.decoded
-    ? memeDurationFrom({ ...state.decoded, totalSec: 0 }, state.memeStartFrame)
-    : null;
+  const meme = state.decoded ? selectedMemeDuration() : null;
   summary.textContent = `${drawn} drawn · ${animated} animated (${animated - drawn} clones) · template ${N} · ${state.settings.revealTotalDuration.toFixed(2)}s reveal (${step.toFixed(2)}s / line) · Intro ${intro.toFixed(2)}s`
-    + (meme === null ? ' · Loading source GIF…' : ` · Original GIF ${meme.toFixed(2)}s · Total ${(intro + meme).toFixed(2)}s`);
+    + (meme === null ? ' · Loading source GIF…' : ` · Original GIF ${meme.toFixed(2)}s / ${memeFullDuration().toFixed(2)}s · Total ${(intro + meme).toFixed(2)}s`);
+  syncTimingInputs();
+  timelineUI?.refresh();
 }
 
 function renderSettings(): void {
@@ -836,6 +905,9 @@ function renderSettings(): void {
     <label>Wait after background change (s)<input type="number" id="set-gray" min="0" max="30" step="0.1" value="${s.grayHold}"></label>
     <label>Transformation motion (s)<input type="number" id="set-trans" min="0" max="30" step="0.1" value="${s.transformDuration}"></label>
     <label>Wait before original GIF (s)<input type="number" id="set-final" min="0" max="30" step="0.1" value="${s.finalHold}"></label>
+    <label>Original GIF playback length (s)<input type="number" id="set-meme" min="0.01" step="0.05" value="${selectedMemeDuration().toFixed(2)}">
+      <small class="meme-end-detail" id="meme-end-label">Loading source frames…</small>
+    </label>
     <div class="settings-section-title">Appearance &amp; export</div>
     <label>Background<input type="color" id="set-bg" value="${s.backgroundColor}"></label>
     <label>Segment color<input type="color" id="set-seg" value="${s.segmentColor}"></label>
@@ -846,7 +918,9 @@ function renderSettings(): void {
     <label>Export scale<select id="set-scale"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></label>`;
   const num = (id: string, fn: (v: number) => void) =>
     $(id).addEventListener('input', (e) => {
-      const v = Number((e.target as HTMLInputElement).value);
+      const input = e.target as HTMLInputElement;
+      if (input.value.trim() === '') return;
+      const v = Number(input.value);
       if (Number.isFinite(v)) {
         fn(v);
         state.playT = Math.min(state.playT, totalDuration());
@@ -861,6 +935,15 @@ function renderSettings(): void {
   num('set-gray', (v) => (state.settings.grayHold = Math.min(30, Math.max(0, v))));
   num('set-trans', (v) => (state.settings.transformDuration = Math.min(30, Math.max(0, v))));
   num('set-final', (v) => (state.settings.finalHold = Math.min(30, Math.max(0, v))));
+  num('set-meme', (v) => setMemePlaybackSeconds(v));
+  $('set-meme').addEventListener('change', () => {
+    const input = $('set-meme') as HTMLInputElement;
+    setMemePlaybackSeconds(Number(input.value));
+    input.value = selectedMemeDuration().toFixed(2);
+    updateTimingSummary();
+    updatePreviewUI();
+    updateGenerateButton();
+  });
   num('set-w', (v) => (state.settings.segmentWidth = Math.min(12, Math.max(1, Math.round(v)))));
   $('set-bg').addEventListener('input', (e) => {
     state.settings.backgroundColor = (e.target as HTMLInputElement).value;
@@ -924,6 +1007,7 @@ function updatePreviewUI(): void {
   }
   $('time').textContent = `${state.playT.toFixed(1)} / ${total.toFixed(1)}s`;
   if (total > 0) seek.value = String(Math.round((state.playT / total) * 1000));
+  timelineUI?.setPlayhead(state.playT);
 }
 
 $('btn-play').addEventListener('click', () => {
@@ -1353,6 +1437,28 @@ $('variation-select').addEventListener('change', (e) => {
 
 async function init(): Promise<void> {
   fitEditorCanvas();
+  timelineUI = mountTimelineEditor($('timeline-editor'), {
+    phases: timelinePhases,
+    playhead: () => state.playT,
+    changeDuration: setTimelinePhaseDuration,
+    seek: (time) => {
+      state.playing = false;
+      ($('btn-play') as HTMLButtonElement).textContent = 'Play';
+      state.playT = Math.min(totalDuration(), Math.max(0, time));
+      updatePreviewUI();
+    },
+    drawThumbnail: (time, canvas) => {
+      const project = buildProject();
+      if (!project) return;
+      const width = 224;
+      const height = Math.max(1, Math.round(width * project.gifHeight / project.gifWidth));
+      if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width;
+        canvas.height = height;
+      }
+      renderFrame(Math.min(time, Math.max(0, totalDuration() - 0.001)), canvas, project);
+    },
+  });
   renderSettings();
   renderMapping();
   refreshUndoRedo();
