@@ -11,7 +11,7 @@ export interface CustomGifPanelCallbacks {
 }
 export interface CustomGifPanel {
   reset(): void;
-  setSource(frames: DecodedFrame[], start: number, endExclusive: number): void;
+  setSource(frames: DecodedFrame[], start: number, endExclusive: number, sourceDescription?: string): void;
   setTargets(targets: TargetSegment[]): void;
 }
 type Tool = 'sketch' | 'edit' | 'add' | 'include' | 'exclude';
@@ -19,17 +19,17 @@ const clamp = (n: number, a: number, b: number) => Math.min(b, Math.max(a, n));
 
 export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanelCallbacks): CustomGifPanel {
   root.innerHTML = [
-    '<div class="custom-gif-heading"><strong>Custom GIF · target tracing</strong>',
+    '<div class="custom-gif-heading"><strong>Custom media · target tracing</strong>',
     '<span class="custom-gif-pill">Local processing · no API key</span></div>',
-    '<div class="custom-gif-upload"><button type="button" id="custom-upload-btn">Upload custom .gif</button>',
-    '<input type="file" id="custom-gif-file" accept="image/gif,.gif" hidden>',
-    '<span id="custom-file-label">No custom GIF selected</span></div>',
+    '<div class="custom-gif-upload"><button type="button" id="custom-upload-btn">Upload GIF / video</button>',
+    '<input type="file" id="custom-gif-file" accept="image/gif,video/mp4,video/webm,video/quicktime,video/x-m4v,.gif,.mp4,.webm,.mov,.m4v" hidden>',
+    '<span id="custom-file-label">No custom GIF or video selected</span></div>',
     '<div class="custom-clip">',
     '<label>IN frame <strong id="custom-in-value">–</strong>',
     '<input type="range" id="custom-in" min="0" max="0" value="0" disabled></label>',
     '<label>OUT frame <strong id="custom-out-value">–</strong>',
     '<input type="range" id="custom-out" min="1" max="1" value="1" disabled></label>',
-    '</div><p id="custom-clip-time" class="custom-gif-help">Choose a GIF to set the clip range.</p>',
+    '</div><p id="custom-clip-time" class="custom-gif-help">Upload GIF or video to select its clip range.</p>',
     '<div class="custom-target-tools">',
     '<button id="custom-sketch" class="active small" type="button">Sketch region</button>',
     '<button id="custom-edit" class="small" type="button">Edit lines</button>',
@@ -50,7 +50,7 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     '<div class="custom-target-actions"><button class="primary" type="button" id="custom-trace" disabled>Local edge trace</button>',
     '<button type="button" id="custom-ai-trace" disabled>AI refine object</button>',
     '<span class="custom-gif-help" id="custom-target-count">0 target lines</span></div>',
-    '<p class="custom-gif-note">Local trace works offline. AI refine downloads the free MagicTouch model once and segments the object on your device (no API key). If AI cannot recognize the object, local trace remains available. Precision changes regenerate lines; edit them afterward.</p>',
+    '<p class="custom-gif-note">Local trace works offline. Video input is sampled into still frames (15 fps, max 20s); source audio is not exported. AI refine downloads the free MagicTouch model once and segments the object on your device (no API key). If AI cannot recognize the object, local trace remains available. Precision changes regenerate lines; edit them afterward.</p>',
   ].join('');
 
   const $ = <T extends HTMLElement = HTMLElement>(selector: string) => root.querySelector(selector) as T;
@@ -66,6 +66,7 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
   const deleteButton = $<HTMLButtonElement>('#custom-delete');
   let frames: DecodedFrame[] = [];
   let inFrame = 0, outExclusive = 0;
+  let sourceDescription = 'GIF';
   let sketch: Point[] = [];
   let contour: Point[] = [];
   let targets: TargetSegment[] = [];
@@ -229,7 +230,7 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
   function reset(): void {
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
-    frames = []; inFrame = 0; outExclusive = 0; sketch = []; contour = []; targets = []; selected = -1;
+    frames = []; inFrame = 0; outExclusive = 0; sourceDescription = 'GIF'; sketch = []; contour = []; targets = []; selected = -1;
     aiRequestId++; learnedMask = null; aiBusy = false; corrections = [];
     inRange.disabled = true; outRange.disabled = true;
     $('#custom-file-label').textContent = 'No custom GIF selected';
@@ -237,7 +238,8 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     $('#custom-in-value').textContent = '–'; $('#custom-out-value').textContent = '–';
     updateButtons(); render();
   }
-  function setSource(next: DecodedFrame[], start: number, endExclusive: number): void {
+  function setSource(next: DecodedFrame[], start: number, endExclusive: number, description = 'GIF'): void {
+    sourceDescription = description;
     const changed = frames !== next || inFrame !== start;
     frames = next;
     inFrame = clamp(start, 0, Math.max(0, frames.length - 1));
@@ -256,7 +258,7 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     const startTime = frames.slice(0, inFrame).reduce((a, f) => a + f.delaySec, 0);
     const duration = frames.slice(inFrame, outExclusive).reduce((a, f) => a + f.delaySec, 0);
     $('#custom-clip-time').textContent = frames.length
-      ? 'Source ' + startTime.toFixed(2) + 's → ' + (startTime + duration).toFixed(2)
+      ? sourceDescription + ' · Source ' + startTime.toFixed(2) + 's → ' + (startTime + duration).toFixed(2)
         + 's · Clip ' + duration.toFixed(2) + 's · ' + (outExclusive - inFrame) + ' frames'
       : 'Choose a GIF to set the clip range.';
     updateButtons(); render();
