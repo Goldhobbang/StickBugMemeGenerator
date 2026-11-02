@@ -21,7 +21,7 @@ self.onmessage = (e: MessageEvent<ExportRequest>) => {
       const index = applyPalette(rgba, palette, 'rgba4444');
       // Preserve source centisecond timing; clamp only sub-20ms delays
       // (widely ignored minimum in browsers). No FPS resampling here.
-      const delay = Math.max(20, Math.round((delaysMs[i] ?? 100) / 10) * 10);
+      const delay = Math.max(10, Math.round((delaysMs[i] ?? 100) / 10) * 10);
       gif.writeFrame(index, width, height, { palette, delay });
       (self as unknown as Worker).postMessage({ type: 'progress', done: i + 1, total });
     }
