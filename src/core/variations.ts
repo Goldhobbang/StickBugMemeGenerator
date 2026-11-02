@@ -24,7 +24,7 @@ export const VARIATIONS: Record<VariationId, VariationPreset> = {
   stickbug: {
     id: 'stickbug',
     name: 'Stick Bug',
-    description: 'Draw at least 9 lines. Extra strokes automatically split the Stick Bug outline; 57 original meme frames follow (5.7 seconds).',
+    description: 'Draw any number of lines (at least one). Missing lines are copied evenly to complete the 9-line Stick Bug outline; extra lines are subdivided. Original meme: 5.7s.',
     gifFile: 'stick-bug.gif',
     referenceWidth: 220,
     referenceHeight: 124,
@@ -37,7 +37,7 @@ export const VARIATIONS: Record<VariationId, VariationPreset> = {
   rickroll: {
     id: 'rickroll',
     name: 'RickRoll',
-    description: 'Draw at least 42 lines. Extra strokes automatically split Rick Astley’s face outline; 180 original frames follow (9 seconds).',
+    description: 'Draw any number of lines (at least one). Missing lines are copied evenly to complete Rick Astley's 42-line face outline; extra lines are subdivided. Original meme: 9s.',
     gifFile: 'rick-roll-256.gif',
     referenceWidth: 256,
     referenceHeight: 256,
