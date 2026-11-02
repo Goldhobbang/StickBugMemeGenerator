@@ -109,8 +109,9 @@ app.innerHTML = `
     <div class="progress" id="progress"><div id="progress-bar"></div></div>
     <div class="status info" id="status">Loading reference GIF…</div>
     <img id="result" class="result-img" alt="Generated GIF" />
-    <details class="settings">
-      <summary>Settings</summary>
+    <details class="settings" open>
+      <summary>Animation timing &amp; settings</summary>
+      <div id="timing-summary" class="timing-summary" aria-live="polite"></div>
       <div class="settings-grid" id="settings-grid"></div>
     </details>
     <div class="kbd-hint"><kbd>Ctrl+Z</kbd> undo · <kbd>Ctrl+Y</kbd> redo · <kbd>Del</kbd> delete · <kbd>Esc</kbd> deselect · <kbd>Space</kbd> play/pause</div>
@@ -731,15 +732,29 @@ $('btn-clear').addEventListener('click', () => {
 
 // ---------------------------------------------------------------- settings panel
 
+function updateTimingSummary(): void {
+  const summary = document.getElementById('timing-summary');
+  if (!summary) return;
+  const intro = computeTimeline(N, state.settings, 0).phaseEEnd;
+  const step = N > 0 ? state.settings.revealTotalDuration / N : 0;
+  const meme = state.decoded
+    ? memeDurationFrom({ ...state.decoded, totalSec: 0 }, state.memeStartFrame)
+    : null;
+  summary.textContent = `${N} lines over ${state.settings.revealTotalDuration.toFixed(2)}s (${step.toFixed(2)}s / line) · Intro ${intro.toFixed(2)}s`
+    + (meme === null ? ' · Loading source GIF…' : ` · Original GIF ${meme.toFixed(2)}s · Total ${(intro + meme).toFixed(2)}s`);
+}
+
 function renderSettings(): void {
   const grid = $('settings-grid');
   const s = state.settings;
   grid.innerHTML = `
-    <label>Reveal interval (s)<input type="number" id="set-reveal" min="0.02" max="2" step="0.01" value="${s.revealInterval}"></label>
-    <label>Initial hold (s)<input type="number" id="set-hold" min="0" max="5" step="0.1" value="${s.holdAfterReveal}"></label>
-    <label>Gray hold (s)<input type="number" id="set-gray" min="0" max="5" step="0.1" value="${s.grayHold}"></label>
-    <label>Transform (s)<input type="number" id="set-trans" min="0.1" max="5" step="0.1" value="${s.transformDuration}"></label>
-    <label>Final hold (s)<input type="number" id="set-final" min="0" max="5" step="0.1" value="${s.finalHold}"></label>
+    <div class="settings-section-title">GIF animation timing · seconds</div>
+    <label>Total line reveal time (s)<input type="number" id="set-reveal" min="0" max="30" step="0.05" value="${s.revealTotalDuration}"></label>
+    <label>Wait before background change (s)<input type="number" id="set-hold" min="0" max="30" step="0.1" value="${s.holdAfterReveal}"></label>
+    <label>Wait after background change (s)<input type="number" id="set-gray" min="0" max="30" step="0.1" value="${s.grayHold}"></label>
+    <label>Transformation motion (s)<input type="number" id="set-trans" min="0" max="30" step="0.1" value="${s.transformDuration}"></label>
+    <label>Wait before original GIF (s)<input type="number" id="set-final" min="0" max="30" step="0.1" value="${s.finalHold}"></label>
+    <div class="settings-section-title">Appearance &amp; export</div>
     <label>Background<input type="color" id="set-bg" value="${s.backgroundColor}"></label>
     <label>Segment color<input type="color" id="set-seg" value="${s.segmentColor}"></label>
     <label>Stroke width (px)<input type="number" id="set-w" min="1" max="12" step="1" value="${s.segmentWidth}"></label>
@@ -752,14 +767,17 @@ function renderSettings(): void {
       const v = Number((e.target as HTMLInputElement).value);
       if (Number.isFinite(v)) {
         fn(v);
+        state.playT = Math.min(state.playT, totalDuration());
         drawEditor();
+        updateTimingSummary();
+        updatePreviewUI();
       }
     });
-  num('set-reveal', (v) => (state.settings.revealInterval = Math.min(2, Math.max(0.02, v))));
-  num('set-hold', (v) => (state.settings.holdAfterReveal = Math.min(5, Math.max(0, v))));
-  num('set-gray', (v) => (state.settings.grayHold = Math.min(5, Math.max(0, v))));
-  num('set-trans', (v) => (state.settings.transformDuration = Math.min(5, Math.max(0.1, v))));
-  num('set-final', (v) => (state.settings.finalHold = Math.min(5, Math.max(0, v))));
+  num('set-reveal', (v) => (state.settings.revealTotalDuration = Math.min(30, Math.max(0, v))));
+  num('set-hold', (v) => (state.settings.holdAfterReveal = Math.min(30, Math.max(0, v))));
+  num('set-gray', (v) => (state.settings.grayHold = Math.min(30, Math.max(0, v))));
+  num('set-trans', (v) => (state.settings.transformDuration = Math.min(30, Math.max(0, v))));
+  num('set-final', (v) => (state.settings.finalHold = Math.min(30, Math.max(0, v))));
   num('set-w', (v) => (state.settings.segmentWidth = Math.min(12, Math.max(1, Math.round(v)))));
   $('set-bg').addEventListener('input', (e) => {
     state.settings.backgroundColor = (e.target as HTMLInputElement).value;
@@ -786,6 +804,7 @@ function renderSettings(): void {
     state.settings.exportScale = (v === 2 || v === 4 ? v : 1) as 1 | 2 | 4;
   });
   ($('set-scale') as HTMLSelectElement).value = String(s.exportScale);
+  updateTimingSummary();
 }
 
 // ---------------------------------------------------------------- preview loop
@@ -1161,6 +1180,7 @@ async function init(): Promise<void> {
     fitEditorCanvas();
     drawEditor();
     updatePreviewUI();
+    updateTimingSummary();
     const v = validate();
     setStatus(v ?? `Reference loaded: ${decoded.frames.length} frames, ${decoded.totalSec.toFixed(1)}s.`, v ? 'info' : 'ok');
     updateGenerateButton();
@@ -1176,6 +1196,7 @@ async function init(): Promise<void> {
         fitEditorCanvas();
         drawEditor();
         updatePreviewUI();
+        updateTimingSummary();
         setStatus(`Reference loaded: ${decoded.frames.length} frames, ${decoded.totalSec.toFixed(1)}s. Upload an image.`, 'ok');
         updateGenerateButton();
         return;
