@@ -37,7 +37,7 @@ export const VARIATIONS: Record<VariationId, VariationPreset> = {
   rickroll: {
     id: 'rickroll',
     name: 'RickRoll',
-    description: 'Draw any number of lines (at least one). Missing lines are copied evenly to complete Rick Astley's 42-line face outline; extra lines are subdivided. Original meme: 9s.',
+    description: 'Draw any number of lines (at least one). Missing lines are copied evenly to complete Rick Astley’s 42-line face outline; extra lines are subdivided. Original meme: 9s.',
     gifFile: 'rick-roll-256.gif',
     referenceWidth: 256,
     referenceHeight: 256,
