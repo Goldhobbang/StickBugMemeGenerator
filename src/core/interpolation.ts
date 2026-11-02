@@ -22,12 +22,6 @@ export function segmentLengthPx(a: Point, b: Point, w: number, h: number): numbe
   return Math.hypot(dx, dy);
 }
 
-export function isValidSegment(a: Point, b: Point, minLenPx: number, w: number, h: number): boolean {
-  if (![a.x, a.y, b.x, b.y].every(Number.isFinite)) return false;
-  if (segmentLengthPx(a, b, w, h) < minLenPx) return false;
-  return true;
-}
-
 export function distToSegmentPx(
   p: Point,
   a: Point,

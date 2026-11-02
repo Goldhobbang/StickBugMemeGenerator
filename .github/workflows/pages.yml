@@ -1,5 +1,6 @@
 name: Deploy to GitHub Pages
 
+# Production deploys stay on main. Pull requests are checked by ci.yml.
 on:
   push:
     branches: [main]
@@ -10,9 +11,11 @@ permissions:
   pages: write
   id-token: write
 
+# Queue main deploys instead of cancelling one that is already running.
+# A later partial commit then fails its own build and leaves the last good deploy up.
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -24,6 +27,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm test
       - run: npm run build
       - uses: actions/upload-pages-artifact@v3
         with:

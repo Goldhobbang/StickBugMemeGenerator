@@ -13,21 +13,27 @@ export interface ModelMask {
   width: number;
   height: number;
 }
-const LIBRARY_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.mjs';
-const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm';
-const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/interactive_segmenter_v2/magic_touch/int8/latest/interactive_segmentation.task';
+/** Pinned to the tasks-vision release that implements setImage + brush segment(). */
+export const MEDIAPIPE_VISION_VERSION = '1.2.0';
+export const SEGMENTATION_LIBRARY_URL =
+  `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VISION_VERSION}/vision_bundle.mjs`;
+export const SEGMENTATION_WASM_URL =
+  `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VISION_VERSION}/wasm`;
+/** MagicTouch int8 model revision 1. Do not use the floating "latest" path. */
+export const SEGMENTATION_MODEL_URL =
+  'https://storage.googleapis.com/mediapipe-models/interactive_segmenter_v2/magic_touch/int8/1/interactive_segmentation.task';
 
 let cached: Promise<{ engine: any; BrushMode: any }> | null = null;
 
 async function acquire(): Promise<{ engine: any; BrushMode: any }> {
   if (!cached) {
     cached = (async () => {
-      const library: any = await import(/* @vite-ignore */ LIBRARY_URL);
+      const library: any = await import(/* @vite-ignore */ SEGMENTATION_LIBRARY_URL);
       if (!library.InteractiveSegmenter || !library.FilesetResolver)
         throw new Error('MediaPipe interactive segmentation is unavailable in this browser.');
-      const fileset = await library.FilesetResolver.forVisionTasks(WASM_URL);
+      const fileset = await library.FilesetResolver.forVisionTasks(SEGMENTATION_WASM_URL);
       const engine = await library.InteractiveSegmenter.createFromOptions(fileset, {
-        baseOptions: { modelAssetPath: MODEL_URL, delegate: 'CPU' },
+        baseOptions: { modelAssetPath: SEGMENTATION_MODEL_URL, delegate: 'CPU' },
       });
       if (typeof engine.setImage !== 'function')
         throw new Error('The loaded segmentation library does not support brush prompts.');

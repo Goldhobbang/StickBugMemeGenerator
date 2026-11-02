@@ -16,7 +16,11 @@ export function computeTimeline(
   settings: Settings,
   memeDuration: number,
 ): Timeline {
-  const revealDuration = segmentCount > 0 ? Math.max(0, settings.revealTotalDuration) : 0;
+  // The reveal window matches the timing field even before any strokes exist.
+  // segmentCount changes which strokes appear, not this phase's length.
+  // Per-line timing is intentionally not applied.
+  void segmentCount;
+  const revealDuration = Math.max(0, settings.revealTotalDuration);
   const phaseAEnd = revealDuration;
   const phaseBEnd = phaseAEnd + settings.holdAfterReveal;
   const phaseCEnd = phaseBEnd + settings.grayHold;

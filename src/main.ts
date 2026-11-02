@@ -8,6 +8,15 @@ import type {
 } from './core/types';
 import { DEFAULT_SETTINGS } from './core/types';
 import { decodeGif, decodeGifFile } from './core/gifDecoder';
+import {
+  PALETTE_SAMPLE_PIXELS,
+  createGifFrameWriter,
+  createPixelSampler,
+  paletteFromSamples,
+  perFrameSampleStride,
+  type GifPalette,
+} from './core/gifEncoder';
+import { introFrameDelaysMs } from './core/gifTiming';
 import { decodeVideoFile, VIDEO_SAMPLE_FPS } from './core/videoDecoder';
 import { preferredVideoFormat, recordProjectVideo } from './core/videoRecorder';
 import { mountCustomGifPanel, type CustomGifPanel } from './core/customGifPanel';
@@ -42,7 +51,6 @@ interface AppState {
   exportedURL: string | null;
   refError: string | null;
   exporting: boolean;
-  worker: Worker | null;
   idCounter: number;
 }
 
@@ -67,7 +75,6 @@ const state: AppState = {
   exportedURL: null,
   refError: null,
   exporting: false,
-  worker: null,
   idCounter: 1,
 };
 
@@ -296,6 +303,14 @@ function canvasPos(e: PointerEvent): Point {
   };
 }
 
+function sourcePixelSize(): { w: number; h: number } {
+  const variation = VARIATIONS[state.variation];
+  return {
+    w: state.decoded?.width ?? variation.referenceWidth,
+    h: state.decoded?.height ?? variation.referenceHeight,
+  };
+}
+
 function fitEditorCanvas(): void {
   const variation = VARIATIONS[state.variation];
   const W = state.decoded?.width ?? variation.referenceWidth;
@@ -481,8 +496,9 @@ editorCanvas.addEventListener('pointerdown', (e) => {
     // Select existing or start new calibration segment.
     let hit: string | null = null;
     let best = 12;
+    const sourceSize = sourcePixelSize();
     for (const t of calibTargets) {
-      const d = distToSegmentPx(p, t.start, t.end, 220, 124);
+      const d = distToSegmentPx(p, t.start, t.end, sourceSize.w, sourceSize.h);
       if (d < best) {
         best = d;
         hit = t.id;
@@ -764,16 +780,6 @@ function validate(): string | null {
     return 'Could not cover the entire target outline. Try Auto-map all.';
   const W = state.decoded.width;
   const H = state.decoded.height;
-  // The existing exporter buffers full RGBA frames. Prevent predictable
-  // out-of-memory failures when combining long footage with 2×/4× output.
-  const introSec = computeTimeline(animatedSegments.length, state.settings, 0).phaseEEnd;
-  const frameEstimate = Math.ceil(introSec * state.settings.outputFps)
-    + (state.memeEndFrameExclusive - state.memeStartFrame);
-  const scale = state.settings.exportScale;
-  const rawByteEstimate = frameEstimate * state.decoded.width * scale
-    * state.decoded.height * scale * 4;
-  if (state.outputFormat === 'gif' && rawByteEstimate > 260 * 1024 * 1024)
-    return 'GIF export is too large for this clip. Choose 1× or Video in Settings.';
   if (state.outputFormat === 'video') {
     if (state.decoded.width * state.settings.exportScale * state.decoded.height * state.settings.exportScale > 1920 * 1080)
       return 'Video export exceeds 1920×1080. Choose a smaller export scale.';
@@ -890,11 +896,9 @@ $('btn-clear').addEventListener('click', () => {
 function timelinePhases(): PhaseSpec[] {
   const settings = state.settings;
   const memeLoaded = Boolean(state.decoded);
-  // The reveal phase is skipped until the user draws their first stroke.
-  const hasStrokes = state.userSegments.length > 0;
   return [
     { id: 'reveal', label: 'Line reveal', shortLabel: 'Reveal', color: '#7655d9',
-      duration: hasStrokes ? settings.revealTotalDuration : 0, min: 0, max: hasStrokes ? 30 : 0 },
+      duration: settings.revealTotalDuration, min: 0, max: 30 },
     { id: 'before', label: 'Before background change', shortLabel: 'Before', color: '#346da9',
       duration: settings.holdAfterReveal, min: 0, max: 30 },
     { id: 'after', label: 'After background change', shortLabel: 'After', color: '#1e8589',
@@ -1000,7 +1004,7 @@ function renderSettings(): void {
     <label>Segment color<input type="color" id="set-seg" value="${s.segmentColor}"></label>
     <label>Stroke width (px)<input type="number" id="set-w" min="1" max="12" step="1" value="${s.segmentWidth}"></label>
     <label>Easing<select id="set-ease"><option value="linear">linear</option><option value="ease-in-out">ease-in-out</option><option value="ease-out">ease-out</option></select></label>
-    <label>Preview/export FPS<select id="set-fps"><option>15</option><option>30</option><option>24</option></select></label>
+    <label title="Preview plays in real time. This value is the introduction frame rate for GIF and video export.">Export intro FPS<select id="set-fps"><option>15</option><option>30</option><option>24</option></select></label>
     <label>Image fit<select id="set-fit"><option value="contain">contain</option><option value="cover">cover</option></select></label>
     <label>Export scale<select id="set-scale"><option value="1">1×</option><option value="2">2×</option><option value="4">4×</option></select></label>`;
   const num = (id: string, fn: (v: number) => void) =>
@@ -1058,7 +1062,7 @@ function renderSettings(): void {
     state.settings.exportScale = (v === 2 || v === 4 ? v : 1) as 1 | 2 | 4;
     updateGenerateButton();
     const issue = validate();
-    if (issue && issue.includes('Export scale')) setStatus(issue, 'error');
+    if (issue && /export scale/i.test(issue)) setStatus(issue, 'error');
   });
   ($('set-scale') as HTMLSelectElement).value = String(s.exportScale);
   updateTimingSummary();
@@ -1122,66 +1126,224 @@ $('seek').addEventListener('input', (e) => {
 
 // ---------------------------------------------------------------- export
 
-function collectExportFrames(): {
-  frames: { data: Uint8ClampedArray; width: number; height: number; delayMs: number }[];
+interface ExportStep {
+  time: number | null;
+  memeIndex: number | null;
+  delayMs: number;
+}
+
+interface ExportCancel {
+  cancelled: boolean;
+  abortEncoder: () => void;
+}
+
+function exportSteps(proj: RenderProject, fps: number): ExportStep[] {
+  const timeline = computeTimeline(proj.userSegments.length, proj.settings, proj.memeDuration);
+  const steps: ExportStep[] = [];
+  let time = 0;
+  for (const delayMs of introFrameDelaysMs(timeline.phaseEEnd, fps)) {
+    steps.push({ time, memeIndex: null, delayMs });
+    time += delayMs / 1000;
+  }
+  for (let i = proj.memeStartIndex; i < proj.memeEndIndex; i++) {
+    steps.push({ time: null, memeIndex: i, delayMs: proj.memeFrames[i].delayCs * 10 });
+  }
+  return steps;
+}
+
+function paintExportStep(
+  step: ExportStep,
+  canvas: HTMLCanvasElement,
+  ctx: CanvasRenderingContext2D,
+  proj: RenderProject,
+  blit: HTMLCanvasElement,
+): Uint8ClampedArray {
+  const width = canvas.width;
+  const height = canvas.height;
+  if (step.memeIndex == null) {
+    renderFrame(step.time ?? 0, canvas, proj);
+  } else {
+    const frame = proj.memeFrames[step.memeIndex];
+    blit.width = frame.imageData.width;
+    blit.height = frame.imageData.height;
+    blit.getContext('2d')!.putImageData(frame.imageData, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(blit, 0, 0, width, height);
+  }
+  return ctx.getImageData(0, 0, width, height).data;
+}
+
+function throwIfCancelled(signal: ExportCancel): void {
+  if (signal.cancelled) throw new Error('Export cancelled.');
+}
+
+/**
+ * Quantize one shared palette, then encode each frame and drop its pixels.
+ * Peak RGBA memory is one frame, so RickRoll 1× stays in the worker and
+ * larger export scales are no longer rejected up front.
+ */
+async function exportGifStream(signal: ExportCancel): Promise<{
+  bytes: Uint8Array;
+  frames: number;
   width: number;
   height: number;
-} {
-  const proj = buildProject()!;
-  const scale = state.settings.exportScale;
-  const W = proj.gifWidth * scale;
-  const H = proj.gifHeight * scale;
-  const c = document.createElement('canvas');
-  c.width = W;
-  c.height = H;
-  const scaledProj: RenderProject = { ...proj };
-  const fps = state.settings.outputFps;
-  const tl = computeTimeline(proj.userSegments.length, state.settings, proj.memeDuration);
-  const out: { data: Uint8ClampedArray; width: number; height: number; delayMs: number }[] = [];
-  const ctx = c.getContext('2d')!;
-
-  // GIF stores delays in 10ms units. Generate the introduction on a
-  // centisecond timeline so rounding a 30fps interval to 30ms does not
-  // shorten the animation by 10%. A 30fps schedule becomes 30/40/30ms.
-  const introEndCs = Math.round(tl.phaseEEnd * 100);
-  let cursorCs = 0;
-  let introFrame = 0;
-  while (cursorCs < introEndCs) {
-    const nextCs = Math.min(
-      introEndCs,
-      Math.max(cursorCs + 1, Math.round(((introFrame + 1) * 100) / fps)),
-    );
-    renderFrame(cursorCs / 100, c, scaledProj);
-    out.push({
-      data: ctx.getImageData(0, 0, W, H).data,
-      width: W,
-      height: H,
-      delayMs: (nextCs - cursorCs) * 10,
-    });
-    cursorCs = nextCs;
-    introFrame++;
-  }
-  // Phase F: original frames verbatim, scaled up. No resampling of
-  // timing: each source frame keeps its own delay. At 1x, pixel data is
-  // copied without smoothing (nearest-neighbor path in renderFrame).
+  peakBytes: number;
+  ms: number;
+  via: 'worker' | 'main';
+}> {
+  const started = performance.now();
+  const proj = buildProject();
+  if (!proj) throw new Error('GIF source is not ready.');
+  const width = proj.gifWidth * state.settings.exportScale;
+  const height = proj.gifHeight * state.settings.exportScale;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  if (!ctx) throw new Error('Canvas 2D not available.');
   const blit = document.createElement('canvas');
-  for (let i = state.memeStartFrame; i < proj.memeEndIndex; i++) {
-    const f = proj.memeFrames[i];
-    blit.width = f.imageData.width;
-    blit.height = f.imageData.height;
-    blit.getContext('2d')!.putImageData(f.imageData, 0, 0);
-    ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, W, H);
-    ctx.drawImage(blit, 0, 0, W, H);
-    out.push({
-      data: ctx.getImageData(0, 0, W, H).data,
-      width: W,
-      height: H,
-      // Copy each source frame ONCE, keeping its native centisecond delay.
-      delayMs: f.delayCs * 10,
-    });
+  const steps = exportSteps(proj, state.settings.outputFps);
+  if (steps.length === 0) throw new Error('Nothing to export.');
+  const stride = perFrameSampleStride(width * height, steps.length, PALETTE_SAMPLE_PIXELS);
+  const sampler = createPixelSampler(PALETTE_SAMPLE_PIXELS);
+  const paint = (index: number) => {
+    throwIfCancelled(signal);
+    return paintExportStep(steps[index], canvas, ctx, proj, blit);
+  };
+
+  for (let i = 0; i < steps.length; i++) {
+    sampler.add(paint(i), stride);
+    if (i % 8 === 0) {
+      $('progress-bar').style.width = `${(i / steps.length) * 40}%`;
+      setStatus(`Sampling GIF colors ${i + 1}/${steps.length}…`, 'info');
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
   }
-  return { frames: out, width: W, height: H };
+  const palette = paletteFromSamples(sampler.bytes());
+  let peakBytes = 0;
+  const encodePass = async (
+    write: (rgba: Uint8ClampedArray, delayMs: number) => Promise<void>,
+  ) => {
+    for (let i = 0; i < steps.length; i++) {
+      throwIfCancelled(signal);
+      const rgba = paint(i);
+      peakBytes = Math.max(peakBytes, rgba.byteLength);
+      await write(rgba, steps[i].delayMs);
+      if (i % 4 === 0) {
+        $('progress-bar').style.width = `${40 + ((i + 1) / steps.length) * 60}%`;
+        setStatus(`Encoding GIF ${i + 1}/${steps.length}…`, 'info');
+      }
+    }
+  };
+
+  try {
+    const bytes = await encodeGifInWorker(width, height, palette, signal, encodePass);
+    return {
+      bytes, frames: steps.length, width, height, peakBytes,
+      ms: performance.now() - started, via: 'worker',
+    };
+  } catch (error) {
+    if (signal.cancelled || (error instanceof Error && error.message === 'Export cancelled.')) throw error;
+    setStatus(
+      `Worker unavailable (${error instanceof Error ? error.message : 'error'}). Encoding in browser…`,
+      'info',
+    );
+    const writer = createGifFrameWriter(width, height, palette);
+    await encodePass(async (rgba, delayMs) => {
+      writer.add(rgba, delayMs);
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    return {
+      bytes: writer.finish(), frames: steps.length, width, height, peakBytes,
+      ms: performance.now() - started, via: 'main',
+    };
+  }
+}
+
+function encodeGifInWorker(
+  width: number,
+  height: number,
+  palette: GifPalette,
+  signal: ExportCancel,
+  writeAll: (write: (rgba: Uint8ClampedArray, delayMs: number) => Promise<void>) => Promise<void>,
+): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    let worker: Worker;
+    try {
+      worker = new Worker(new URL('./workers/gifExport.worker.ts', import.meta.url), { type: 'module' });
+    } catch (error) {
+      reject(error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    let settled = false;
+    let release = () => {};
+    let rejectWait = (_error: Error) => {};
+    let pending = Promise.resolve();
+    const arm = () => {
+      pending = new Promise<void>((done, fail) => {
+        const timer = window.setTimeout(() => fail(new Error('GIF encoder timed out.')), 60_000);
+        release = () => { window.clearTimeout(timer); done(); };
+        rejectWait = (error: Error) => { window.clearTimeout(timer); fail(error); };
+      });
+      void pending.catch(() => undefined);
+    };
+    const fail = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      rejectWait(error);
+      worker.terminate();
+      reject(error);
+    };
+    const succeed = (bytes: Uint8Array) => {
+      if (settled) return;
+      settled = true;
+      worker.terminate();
+      resolve(bytes);
+    };
+    signal.abortEncoder = () => fail(new Error('Export cancelled.'));
+    worker.onmessage = (event: MessageEvent) => {
+      if (settled) return;
+      const message = event.data as
+        | { type: 'ready' | 'ack' }
+        | { type: 'done'; buffer: ArrayBuffer }
+        | { type: 'error'; message: string };
+      if (message.type === 'ready' || message.type === 'ack') release();
+      else if (message.type === 'done') {
+        const bytes = new Uint8Array(message.buffer);
+        if (bytes.length < 7 || bytes[0] !== 71 || bytes[1] !== 73 || bytes[2] !== 70) {
+          fail(new Error('invalid worker output'));
+        } else succeed(bytes);
+      } else if (message.type === 'error') fail(new Error(message.message || 'worker encoding error'));
+      else fail(new Error('unrecognized worker response'));
+    };
+    worker.onerror = (event: ErrorEvent) => {
+      event.preventDefault();
+      fail(new Error(event.message || 'worker script/load error'));
+    };
+    worker.onmessageerror = () => fail(new Error('worker message deserialization error'));
+
+    void (async () => {
+      try {
+        arm();
+        worker.postMessage({ type: 'start', width, height, palette });
+        await pending;
+        await writeAll(async (rgba, delayMs) => {
+          throwIfCancelled(signal);
+          const exact = rgba.byteOffset === 0 && rgba.byteLength === rgba.buffer.byteLength
+            ? rgba
+            : rgba.slice();
+          arm();
+          worker.postMessage({ type: 'frame', delayMs, buffer: exact.buffer }, [exact.buffer]);
+          await pending;
+        });
+        throwIfCancelled(signal);
+        worker.postMessage({ type: 'finish' });
+      } catch (error) {
+        fail(error instanceof Error ? error : new Error(String(error)));
+      }
+    })();
+  });
 }
 
 async function runExport(): Promise<void> {
@@ -1237,11 +1399,14 @@ async function runExport(): Promise<void> {
       setStatus('Video ready · ' + format.label + ' · ' + totalFrames +
         ' frames · ' + (blob.size / 1024 / 1024).toFixed(2) + ' MB · no audio', 'ok');
     } else {
+      const signal = { cancelled: false, abortEncoder: () => {} };
+      $('btn-cancel').onclick = () => {
+        signal.cancelled = true;
+        signal.abortEncoder();
+      };
       setStatus('Rendering GIF frames…', 'info');
-      const { frames, width, height } = collectExportFrames();
-      setStatus('Encoding ' + frames.length + ' GIF frames…', 'info');
-      const bytes = await encodeWithWorkerOrFallback(frames, width, height);
-      const blob = new Blob([bytes as unknown as BlobPart], { type: 'image/gif' });
+      const exported = await exportGifStream(signal);
+      const blob = new Blob([exported.bytes as unknown as BlobPart], { type: 'image/gif' });
       state.exportedURL = URL.createObjectURL(blob);
       const img = $('result') as HTMLImageElement;
       img.src = state.exportedURL;
@@ -1251,11 +1416,29 @@ async function runExport(): Promise<void> {
       download.download = VARIATIONS[state.variation].exportFilename;
       (download.querySelector('button') as HTMLButtonElement).textContent = 'Download ' + download.download;
       download.style.display = '';
-      setStatus('GIF ready · ' + frames.length + ' frames · ' +
-        (blob.size / 1024).toFixed(0) + ' KB', 'ok');
+      const previousBytes = exported.frames * exported.width * exported.height * 4;
+      console.info('GIF_EXPORT_STATS', JSON.stringify({
+        frames: exported.frames,
+        width: exported.width,
+        height: exported.height,
+        bytes: blob.size,
+        ms: Math.round(exported.ms),
+        peakBytes: exported.peakBytes,
+        previousBufferedBytes: previousBytes,
+        via: exported.via,
+      }));
+      setStatus(
+        'GIF ready · ' + exported.frames + ' frames · ' +
+          (blob.size / 1024).toFixed(0) + ' KB · ' +
+          (exported.ms / 1000).toFixed(2) + 's · peak ' +
+          (exported.peakBytes / 1024 / 1024).toFixed(2) + ' MB',
+        'ok',
+      );
     }
   } catch (e) {
-    setStatus('Export failed: ' + (e instanceof Error ? e.message : String(e)), 'error');
+    const message = e instanceof Error ? e.message : String(e);
+    const cancelled = message === 'Export cancelled.' || (e instanceof DOMException && e.name === 'AbortError');
+    setStatus(cancelled ? 'Export cancelled.' : 'Export failed: ' + message, cancelled ? 'info' : 'error');
   } finally {
     state.recordingAbort = null;
     state.exporting = false;
@@ -1270,147 +1453,6 @@ async function runExport(): Promise<void> {
 
 function formatLabelForRecording(): string {
   return preferredVideoFormat()?.label ?? 'video';
-}
-
-function encodeWithWorkerOrFallback(
-  frames: { data: Uint8ClampedArray; width: number; height: number; delayMs: number }[],
-  width: number,
-  height: number,
-): Promise<Uint8Array> {
-  // Keep the originals intact until the worker succeeds. Transferring every
-  // frame detaches the only buffers, making recovery impossible if the worker
-  // cannot load or is killed by the browser.
-  let cancelled = false;
-  let worker: Worker | null = null;
-  const cancelError = () => new Error('Export cancelled.');
-  const closeWorker = () => {
-    if (worker) {
-      worker.onmessage = null;
-      worker.onerror = null;
-      worker.onmessageerror = null;
-      worker.terminate();
-      worker = null;
-    }
-    state.worker = null;
-  };
-
-  return new Promise<Uint8Array>((resolve, reject) => {
-    let settled = false;
-    const finish = (bytes: Uint8Array) => {
-      if (settled) return;
-      settled = true;
-      closeWorker();
-      resolve(bytes);
-    };
-    const fail = (error: Error) => {
-      if (settled) return;
-      settled = true;
-      closeWorker();
-      reject(error);
-    };
-
-    const cancelledByUser = () => {
-      cancelled = true;
-      fail(cancelError());
-    };
-    $('btn-cancel').onclick = cancelledByUser;
-
-    // Chunked fallback avoids reliance on Web Worker module loading.
-    // Also avoids a second complete copy of 2x/4x output frames in memory.
-    async function encodeOnMainThread(reason: string): Promise<void> {
-      if (settled || cancelled) return;
-      closeWorker();
-      setStatus(`Worker unavailable (${reason}). Encoding in browser…`, 'info');
-      try {
-        const { GIFEncoder, quantize, applyPalette } = await import('gifenc');
-        const gif = GIFEncoder();
-        for (let i = 0; i < frames.length; i++) {
-          if (cancelled || settled) throw cancelError();
-          const frame = frames[i];
-          const palette = quantize(frame.data, 256, { format: 'rgba4444' });
-          const indexed = applyPalette(frame.data, palette, 'rgba4444');
-          const delay = Math.max(10, Math.round(frame.delayMs / 10) * 10);
-          gif.writeFrame(indexed, width, height, { palette, delay });
-          $('progress-bar').style.width = `${((i + 1) / frames.length) * 100}%`;
-          if (i % 4 === 0) {
-            setStatus(`Encoding locally ${i + 1}/${frames.length}…`, 'info');
-            await new Promise<void>((r) => setTimeout(r, 0));
-          }
-        }
-        gif.finish();
-        const bytes = gif.bytes().slice();
-        if (bytes.length < 7 || bytes[0] !== 71 || bytes[1] !== 73 || bytes[2] !== 70) {
-          throw new Error('Encoder did not produce a valid GIF header.');
-        }
-        finish(bytes);
-      } catch (error) {
-        fail(error instanceof Error ? error : new Error(String(error)));
-      }
-    }
-
-    // Structured-cloning huge frame arrays can exhaust worker memory.
-    // Such exports run directly with the chunked encoder instead.
-    const totalBytes = frames.reduce((sum, f) => sum + f.data.byteLength, 0);
-    if (totalBytes > 64 * 1024 * 1024) {
-      void encodeOnMainThread('large export');
-      return;
-    }
-
-    try {
-      worker = new Worker(new URL('./workers/gifExport.worker.ts', import.meta.url), {
-        type: 'module',
-      });
-      state.worker = worker;
-    } catch (error) {
-      void encodeOnMainThread(error instanceof Error ? error.message : 'startup failure');
-      return;
-    }
-
-    const w = worker;
-    w.onmessage = (e: MessageEvent) => {
-      if (settled || cancelled) return;
-      const msg = e.data as
-        | { type: 'progress'; done: number; total: number }
-        | { type: 'done'; buffer: ArrayBuffer }
-        | { type: 'error'; message: string };
-      if (msg.type === 'progress') {
-        $('progress-bar').style.width = `${(msg.done / msg.total) * 100}%`;
-        setStatus(`Encoding ${msg.done}/${msg.total}…`, 'info');
-      } else if (msg.type === 'done') {
-        const bytes = new Uint8Array(msg.buffer);
-        if (bytes.length < 7 || bytes[0] !== 71 || bytes[1] !== 73 || bytes[2] !== 70) {
-          void encodeOnMainThread('invalid worker output');
-        } else {
-          finish(bytes);
-        }
-      } else if (msg.type === 'error') {
-        void encodeOnMainThread(msg.message || 'worker encoding error');
-      } else {
-        void encodeOnMainThread('unrecognized worker response');
-      }
-    };
-    w.onerror = (event: ErrorEvent) => {
-      event.preventDefault();
-      void encodeOnMainThread(event.message || 'worker script/load error');
-    };
-    w.onmessageerror = () => {
-      void encodeOnMainThread('worker message deserialization error');
-    };
-
-    try {
-      // Do NOT transfer/detach buffers: worker may fail before sending any
-      // result, and the original pixels are needed for fallback encoding.
-      w.postMessage({
-        type: 'export',
-        frames: frames.map((f) => f.data.buffer),
-        width,
-        height,
-        delaysMs: frames.map((f) => f.delayMs),
-      });
-    } catch (error) {
-      void encodeOnMainThread(error instanceof Error ? error.message : 'message send error');
-    }
-  });
 }
 
 $('btn-generate').addEventListener('click', runExport);

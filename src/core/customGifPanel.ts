@@ -110,7 +110,7 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
       ctx.fillStyle = '#9a9ab0';
       ctx.font = '14px sans-serif';
       ctx.textAlign = 'center';
-      ctx.fillText('Upload a GIF to select its target', canvas.width / 2, canvas.height / 2);
+      ctx.fillText('Upload a GIF or video', canvas.width / 2, canvas.height / 2);
       ctx.textAlign = 'start';
     }
     const w = canvas.width, h = canvas.height;
@@ -233,8 +233,8 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     frames = []; inFrame = 0; outExclusive = 0; sourceDescription = 'GIF'; sketch = []; contour = []; targets = []; selected = -1;
     aiRequestId++; learnedMask = null; aiBusy = false; corrections = [];
     inRange.disabled = true; outRange.disabled = true;
-    $('#custom-file-label').textContent = 'No custom GIF selected';
-    $('#custom-clip-time').textContent = 'Choose a GIF to set the clip range.';
+    $('#custom-file-label').textContent = 'No custom GIF or video selected';
+    $('#custom-clip-time').textContent = 'Choose a GIF or video to set the clip range.';
     $('#custom-in-value').textContent = '–'; $('#custom-out-value').textContent = '–';
     updateButtons(); render();
   }
@@ -260,7 +260,7 @@ export function mountCustomGifPanel(root: HTMLElement, callbacks: CustomGifPanel
     $('#custom-clip-time').textContent = frames.length
       ? sourceDescription + ' · Source ' + startTime.toFixed(2) + 's → ' + (startTime + duration).toFixed(2)
         + 's · Clip ' + duration.toFixed(2) + 's · ' + (outExclusive - inFrame) + ' frames'
-      : 'Choose a GIF to set the clip range.';
+      : 'Choose a GIF or video to set the clip range.';
     updateButtons(); render();
   }
   function setTargets(next: TargetSegment[]): void {
