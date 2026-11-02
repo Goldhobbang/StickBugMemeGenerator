@@ -30,7 +30,7 @@ export type Easing = 'linear' | 'ease-in-out' | 'ease-out';
 export type ImageFit = 'contain' | 'cover';
 
 export interface Settings {
-  revealInterval: number;
+  revealTotalDuration: number;
   holdAfterReveal: number;
   grayHold: number;
   transformDuration: number;
@@ -45,7 +45,7 @@ export interface Settings {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  revealInterval: 0.15,
+  revealTotalDuration: 1.35, // 9 lines × 0.15 seconds (previous default)
   holdAfterReveal: 1.0,
   grayHold: 0.5,
   transformDuration: 1.0,
