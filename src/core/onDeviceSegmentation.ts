@@ -7,6 +7,7 @@ import type { Point } from './types';
  * When network/model/browser support is missing the local edge tracer remains
  * fully usable.
  */
+export interface SegmentationCorrection { point: Point; positive: boolean; }
 export interface ModelMask {
   values: Float32Array;
   width: number;
@@ -59,7 +60,7 @@ function polygonCentroid(points: Point[]): Point {
   return { x: cx / (3 * twiceArea), y: cy / (3 * twiceArea) };
 }
 
-export async function segmentObjectFromSketch(frame: ImageData, polygon: Point[]): Promise<ModelMask> {
+export async function segmentObjectFromSketch(frame: ImageData, polygon: Point[], corrections: SegmentationCorrection[] = []): Promise<ModelMask> {
   if (polygon.length < 3) throw new Error('Sketch a closed loop around the subject first.');
   const { engine, BrushMode } = await acquire();
   const canvas = document.createElement('canvas');
@@ -70,17 +71,21 @@ export async function segmentObjectFromSketch(frame: ImageData, polygon: Point[]
   // MagicTouch v2 brush input: a positive mark at the center of the rough ROI.
   // If it picks the wrong instance, adjust the ROI or fall back to local trace.
   engine.setImage(canvas);
-  const response = engine.segment([{
-    brushMode: BrushMode?.POSITIVE ?? 1,
-    point: [point],
-    isCompleted: true,
-  }]);
+  const strokes = [
+    { brushMode: BrushMode?.POSITIVE ?? 1, point: [point], isCompleted: true },
+    ...corrections.map(({ point: p, positive }) => ({
+      brushMode: positive ? (BrushMode?.POSITIVE ?? 1) : (BrushMode?.NEGATIVE ?? 2),
+      point: [{ x: Math.max(0, Math.min(1, p.x)), y: Math.max(0, Math.min(1, p.y)) }],
+      isCompleted: true,
+    })),
+  ];
+  const response = engine.segment(strokes);
   const mask = response?.confidenceMasks?.[0] ?? response?.mask ?? response;
   if (!mask || typeof mask.getAsFloat32Array !== 'function')
     throw new Error('The AI model did not return a usable confidence mask.');
   const values = new Float32Array(mask.getAsFloat32Array());
   const width = Number(mask.width), height = Number(mask.height);
-  mask.close?.();
+  response?.close?.();
   if (!Number.isInteger(width) || !Number.isInteger(height) || width * height !== values.length)
     throw new Error('The AI model returned an invalid mask size.');
   return { values, width, height };
