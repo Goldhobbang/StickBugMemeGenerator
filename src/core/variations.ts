@@ -2,7 +2,7 @@ import type { TargetSegment } from './types';
 import stickTemplate from '../assets/stickbug-template.json';
 import rickTemplate from '../assets/rickroll-template.json';
 
-export type VariationId = 'stickbug' | 'rickroll';
+export type VariationId = 'stickbug' | 'rickroll' | 'custom';
 
 export interface VariationPreset {
   id: VariationId;
@@ -21,6 +21,19 @@ export interface VariationPreset {
 }
 
 export const VARIATIONS: Record<VariationId, VariationPreset> = {
+  custom: {
+    id: 'custom',
+    name: 'Custom GIF',
+    description: 'Upload a GIF, choose start and end frames, sketch around an object and trace its outline into editable target lines. Local edge tracing needs no API key.',
+    gifFile: '',
+    referenceWidth: 256,
+    referenceHeight: 256,
+    memeStartFrame: 0,
+    segments: [],
+    backgroundColor: '#808080',
+    segmentColor: '#a855f7',
+    exportFilename: 'custom-meme.gif',
+  },
   stickbug: {
     id: 'stickbug',
     name: 'Stick Bug',
