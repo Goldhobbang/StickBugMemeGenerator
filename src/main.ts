@@ -1193,39 +1193,83 @@ async function runExport(): Promise<void> {
   if (state.exporting) return;
   state.exporting = true;
   ($('variation-select') as HTMLSelectElement).disabled = true;
+  ($('export-format') as HTMLSelectElement).disabled = true;
+  $('custom-panel').classList.add('exporting');
   updateGenerateButton();
   $('btn-cancel').style.display = '';
   $('progress').classList.add('show');
 
   try {
-    setStatus('Rendering frames…', 'info');
-    // Yield so UI paints before heavy loop.
-    await new Promise((r) => setTimeout(r, 30));
-    const { frames, width, height } = collectExportFrames();
-    setStatus(`Encoding ${frames.length} frames…`, 'info');
+    clearExportResult();
+    // Yield to paint progress UI before intensive frame rendering.
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
 
-    const bytes = await encodeWithWorkerOrFallback(frames, width, height);
-    const blob = new Blob([bytes as unknown as BlobPart], { type: 'image/gif' });
-    if (state.exportedURL) URL.revokeObjectURL(state.exportedURL);
-    state.exportedURL = URL.createObjectURL(blob);
-    const img = $('result') as HTMLImageElement;
-    img.src = state.exportedURL;
-    img.classList.add('show');
-    const dl = $('btn-download') as HTMLAnchorElement;
-    dl.href = state.exportedURL;
-    dl.download = VARIATIONS[state.variation].exportFilename;
-    (dl.querySelector('button') as HTMLButtonElement).textContent = `Download ${dl.download}`;
-    dl.style.display = '';
-    setStatus(`Done — ${frames.length} frames, ${(blob.size / 1024).toFixed(0)} KB.`, 'ok');
+    if (state.outputFormat === 'video') {
+      const project = buildProject();
+      if (!project) throw new Error('Video source is not ready.');
+      const controller = new AbortController();
+      state.recordingAbort = controller;
+      $('btn-cancel').onclick = () => controller.abort();
+      setStatus('Recording video with your browser encoder… Keep this tab active.', 'info');
+
+      const { blob, format, totalFrames } = await recordProjectVideo({
+        project,
+        fps: state.settings.outputFps,
+        scale: state.settings.exportScale,
+        signal: controller.signal,
+        onProgress: (value) => {
+          $('progress-bar').style.width = Math.round(value * 100) + '%';
+          if (Math.round(value * 100) % 10 === 0) {
+            setStatus('Recording ' + formatLabelForRecording() + ' · ' +
+              Math.round(value * 100) + '% (keep this tab visible)', 'info');
+          }
+        },
+      });
+      state.exportedURL = URL.createObjectURL(blob);
+      const video = $('video-result') as HTMLVideoElement;
+      video.src = state.exportedURL;
+      video.classList.add('show');
+      const download = $('btn-download') as HTMLAnchorElement;
+      download.href = state.exportedURL;
+      download.download = VARIATIONS[state.variation].exportFilename.replace(/\.gif$/i, '.' + format.extension);
+      (download.querySelector('button') as HTMLButtonElement).textContent = 'Download ' + download.download;
+      download.style.display = '';
+      setStatus('Video ready · ' + format.label + ' · ' + totalFrames +
+        ' frames · ' + (blob.size / 1024 / 1024).toFixed(2) + ' MB · no audio', 'ok');
+    } else {
+      setStatus('Rendering GIF frames…', 'info');
+      const { frames, width, height } = collectExportFrames();
+      setStatus('Encoding ' + frames.length + ' GIF frames…', 'info');
+      const bytes = await encodeWithWorkerOrFallback(frames, width, height);
+      const blob = new Blob([bytes as unknown as BlobPart], { type: 'image/gif' });
+      state.exportedURL = URL.createObjectURL(blob);
+      const img = $('result') as HTMLImageElement;
+      img.src = state.exportedURL;
+      img.classList.add('show');
+      const download = $('btn-download') as HTMLAnchorElement;
+      download.href = state.exportedURL;
+      download.download = VARIATIONS[state.variation].exportFilename;
+      (download.querySelector('button') as HTMLButtonElement).textContent = 'Download ' + download.download;
+      download.style.display = '';
+      setStatus('GIF ready · ' + frames.length + ' frames · ' +
+        (blob.size / 1024).toFixed(0) + ' KB', 'ok');
+    }
   } catch (e) {
-    setStatus(`Export failed: ${e instanceof Error ? e.message : String(e)}`, 'error');
+    setStatus('Export failed: ' + (e instanceof Error ? e.message : String(e)), 'error');
   } finally {
+    state.recordingAbort = null;
     state.exporting = false;
     ($('variation-select') as HTMLSelectElement).disabled = false;
+    $('custom-panel').classList.remove('exporting');
     $('btn-cancel').style.display = 'none';
+    $('btn-cancel').onclick = null;
     $('progress').classList.remove('show');
-    updateGenerateButton();
+    updateOutputFormatUI();
   }
+}
+
+function formatLabelForRecording(): string {
+  return preferredVideoFormat()?.label ?? 'video';
 }
 
 function encodeWithWorkerOrFallback(
