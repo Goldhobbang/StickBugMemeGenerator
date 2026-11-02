@@ -815,9 +815,11 @@ $('btn-clear').addEventListener('click', () => {
 function timelinePhases(): PhaseSpec[] {
   const settings = state.settings;
   const memeLoaded = Boolean(state.decoded);
+  // The reveal phase is skipped until the user draws their first stroke.
+  const hasStrokes = state.userSegments.length > 0;
   return [
     { id: 'reveal', label: 'Line reveal', shortLabel: 'Reveal', color: '#7655d9',
-      duration: settings.revealTotalDuration, min: 0, max: 30 },
+      duration: hasStrokes ? settings.revealTotalDuration : 0, min: 0, max: hasStrokes ? 30 : 0 },
     { id: 'before', label: 'Before background change', shortLabel: 'Before', color: '#346da9',
       duration: settings.holdAfterReveal, min: 0, max: 30 },
     { id: 'after', label: 'After background change', shortLabel: 'After', color: '#1e8589',
